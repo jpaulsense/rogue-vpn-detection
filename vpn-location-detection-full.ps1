@@ -6,6 +6,9 @@
     Multi-layered detection strategy for identifying users circumventing geographic
     work requirements using consumer VPNs (including router-level VPN).
 
+    This script is fully interactive and will guide you through any missing
+    requirements or dependencies.
+
     Detection Methods:
     1. WiFi BSSID Geolocation (Google API) - CRITICAL confidence
     2. Timezone vs IP Geolocation Mismatch - HIGH confidence
@@ -20,7 +23,7 @@
     11. Latency Analysis - LOW-MEDIUM confidence
 
 .PARAMETER ApiKey
-    Google Geolocation API key. Can also be set via GOOGLE_GEOLOCATION_API_KEY environment variable.
+    Google Geolocation API key. If not provided, will prompt interactively.
 
 .PARAMETER OutputJson
     Output results as JSON for machine parsing.
@@ -28,11 +31,12 @@
 .PARAMETER SkipWifi
     Skip WiFi BSSID geolocation (for devices without WiFi).
 
-.PARAMETER Verbose
-    Show detailed output for each check.
+.PARAMETER SkipPreflight
+    Skip preflight checks (for advanced users).
 
 .NOTES
     Author: VPN Location Detection System
+    Version: 1.1.0
     Date: February 2026
     Requires: Windows 10/11, PowerShell 5.1+
 #>
@@ -46,12 +50,17 @@ param(
     [switch]$OutputJson,
 
     [Parameter()]
-    [switch]$SkipWifi
+    [switch]$SkipWifi,
+
+    [Parameter()]
+    [switch]$SkipPreflight
 )
 
 # ============================================================================
 # Configuration
 # ============================================================================
+
+$ScriptVersion = "1.1.0"
 
 # California bounding box
 $CaBounds = @{
@@ -185,56 +194,420 @@ function Write-Section {
     Write-ColorOutput "────────────────────────────────────────" -Color Cyan
 }
 
-function Get-ApiKey {
-    # 1. Check command line parameter
-    if ($ApiKey) { return $ApiKey }
+function Write-Banner {
+    Clear-Host
+    Write-ColorOutput "╔══════════════════════════════════════════════════════════════╗" -Color Cyan
+    Write-ColorOutput "║                                                              ║" -Color Cyan
+    Write-ColorOutput "║     VPN LOCATION SPOOFING DETECTION v$ScriptVersion               ║" -Color Cyan
+    Write-ColorOutput "║                                                              ║" -Color Cyan
+    Write-ColorOutput "║     Comprehensive Multi-Layer Detection System               ║" -Color Cyan
+    Write-ColorOutput "║                                                              ║" -Color Cyan
+    Write-ColorOutput "╚══════════════════════════════════════════════════════════════╝" -Color Cyan
+    Write-Host ""
+}
 
-    # 2. Check environment variable
-    if ($env:GOOGLE_GEOLOCATION_API_KEY) { return $env:GOOGLE_GEOLOCATION_API_KEY }
+function Wait-KeyPress {
+    param([string]$Message = "Press any key to continue...")
+    Write-Host ""
+    Write-Host $Message -ForegroundColor Gray
+    $null = $Host.UI.RawUI.ReadKey("NoEcho,IncludeKeyDown")
+    Write-Host ""
+}
 
-    # 3. Check .env file in script directory
-    $envPath = Join-Path $PSScriptRoot ".env"
-    if (Test-Path $envPath) {
-        $content = Get-Content $envPath -Raw
-        if ($content -match 'GOOGLE_GEOLOCATION_API_KEY=(.+)') {
-            $key = $matches[1].Trim()
-            if ($key -and $key -ne 'your-api-key-here') {
-                return $key
+function Get-UserConfirmation {
+    param(
+        [string]$Question,
+        [bool]$DefaultYes = $true
+    )
+
+    $default = if ($DefaultYes) { "[Y/n]" } else { "[y/N]" }
+    $response = Read-Host "$Question $default"
+
+    if ([string]::IsNullOrWhiteSpace($response)) {
+        return $DefaultYes
+    }
+
+    return $response -match '^[Yy]'
+}
+
+# ============================================================================
+# Preflight Check Functions
+# ============================================================================
+
+function Test-AdminPrivileges {
+    $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
+    $principal = New-Object Security.Principal.WindowsPrincipal($identity)
+    return $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+}
+
+function Test-InternetConnectivity {
+    try {
+        $result = Test-Connection -ComputerName "8.8.8.8" -Count 1 -Quiet -ErrorAction SilentlyContinue
+        return $result
+    }
+    catch {
+        return $false
+    }
+}
+
+function Test-WifiAvailable {
+    try {
+        $wlanService = Get-Service -Name "WlanSvc" -ErrorAction SilentlyContinue
+        if (-not $wlanService -or $wlanService.Status -ne 'Running') {
+            return @{ Available = $false; Reason = "WLAN AutoConfig service not running" }
+        }
+
+        $adapters = Get-NetAdapter -ErrorAction SilentlyContinue | Where-Object {
+            $_.InterfaceDescription -match 'Wi-Fi|Wireless|802\.11|WLAN' -and $_.Status -eq 'Up'
+        }
+
+        if (-not $adapters) {
+            # Check if WiFi adapter exists but is disabled
+            $allWifiAdapters = Get-NetAdapter -ErrorAction SilentlyContinue | Where-Object {
+                $_.InterfaceDescription -match 'Wi-Fi|Wireless|802\.11|WLAN'
+            }
+
+            if ($allWifiAdapters) {
+                return @{ Available = $false; Reason = "WiFi adapter found but not connected"; CanEnable = $true }
+            }
+            return @{ Available = $false; Reason = "No WiFi adapter found" }
+        }
+
+        return @{ Available = $true; AdapterName = $adapters[0].Name }
+    }
+    catch {
+        return @{ Available = $false; Reason = "Error checking WiFi: $_" }
+    }
+}
+
+function Test-PowerShellVersion {
+    $version = $PSVersionTable.PSVersion
+    return @{
+        Version = $version.ToString()
+        Supported = $version.Major -ge 5
+    }
+}
+
+function Show-PreflightResults {
+    param(
+        [hashtable]$Results
+    )
+
+    Write-Section "Preflight Check Results"
+
+    foreach ($check in $Results.Keys | Sort-Object) {
+        $result = $Results[$check]
+        $status = if ($result.Passed) { "[OK]" } else { "[!!]" }
+        $color = if ($result.Passed) { "Green" } else { "Yellow" }
+
+        Write-ColorOutput "  $status $check" -Color $color
+        if ($result.Details) {
+            Write-Host "      $($result.Details)" -ForegroundColor Gray
+        }
+    }
+}
+
+function Invoke-PreflightChecks {
+    Write-Section "Running Preflight Checks"
+    Write-Host ""
+    Write-Host "  Checking system requirements..." -ForegroundColor Gray
+
+    $results = @{}
+    $allPassed = $true
+    $criticalFailed = $false
+
+    # 1. PowerShell Version
+    Write-Host "  [1/6] Checking PowerShell version..." -NoNewline
+    $psVersion = Test-PowerShellVersion
+    if ($psVersion.Supported) {
+        Write-ColorOutput " OK ($($psVersion.Version))" -Color Green
+        $results["PowerShell Version"] = @{ Passed = $true; Details = $psVersion.Version }
+    }
+    else {
+        Write-ColorOutput " FAIL ($($psVersion.Version))" -Color Red
+        $results["PowerShell Version"] = @{ Passed = $false; Details = "Requires PowerShell 5.1+" }
+        $criticalFailed = $true
+    }
+
+    # 2. Internet Connectivity
+    Write-Host "  [2/6] Checking internet connectivity..." -NoNewline
+    if (Test-InternetConnectivity) {
+        Write-ColorOutput " OK" -Color Green
+        $results["Internet Connection"] = @{ Passed = $true }
+    }
+    else {
+        Write-ColorOutput " FAIL" -Color Red
+        $results["Internet Connection"] = @{ Passed = $false; Details = "No internet access detected" }
+        $criticalFailed = $true
+    }
+
+    # 3. Administrator Privileges
+    Write-Host "  [3/6] Checking administrator privileges..." -NoNewline
+    $isAdmin = Test-AdminPrivileges
+    if ($isAdmin) {
+        Write-ColorOutput " OK (Admin)" -Color Green
+        $results["Admin Privileges"] = @{ Passed = $true; Details = "Running as Administrator" }
+    }
+    else {
+        Write-ColorOutput " LIMITED" -Color Yellow
+        $results["Admin Privileges"] = @{ Passed = $true; Details = "Some checks may be limited" }
+    }
+
+    # 4. WiFi Availability
+    Write-Host "  [4/6] Checking WiFi adapter..." -NoNewline
+    $wifiStatus = Test-WifiAvailable
+    if ($wifiStatus.Available) {
+        Write-ColorOutput " OK ($($wifiStatus.AdapterName))" -Color Green
+        $results["WiFi Adapter"] = @{ Passed = $true; Details = $wifiStatus.AdapterName }
+        $script:WifiAvailable = $true
+    }
+    else {
+        Write-ColorOutput " NOT AVAILABLE" -Color Yellow
+        $results["WiFi Adapter"] = @{ Passed = $false; Details = $wifiStatus.Reason }
+        $script:WifiAvailable = $false
+
+        if ($wifiStatus.CanEnable) {
+            Write-Host ""
+            Write-ColorOutput "      WiFi adapter found but not connected." -Color Yellow
+            Write-Host "      For best results, connect to a WiFi network."
+        }
+    }
+
+    # 5. Required Services
+    Write-Host "  [5/6] Checking required services..." -NoNewline
+    $servicesOk = $true
+    $serviceDetails = @()
+
+    $requiredServices = @(
+        @{ Name = "WlanSvc"; DisplayName = "WLAN AutoConfig"; Critical = $false }
+        @{ Name = "Dnscache"; DisplayName = "DNS Client"; Critical = $true }
+    )
+
+    foreach ($svc in $requiredServices) {
+        $service = Get-Service -Name $svc.Name -ErrorAction SilentlyContinue
+        if (-not $service -or $service.Status -ne 'Running') {
+            if ($svc.Critical) {
+                $servicesOk = $false
+            }
+            $serviceDetails += "$($svc.DisplayName): Not Running"
+        }
+    }
+
+    if ($servicesOk) {
+        Write-ColorOutput " OK" -Color Green
+        $results["Windows Services"] = @{ Passed = $true }
+    }
+    else {
+        Write-ColorOutput " WARNING" -Color Yellow
+        $results["Windows Services"] = @{ Passed = $false; Details = $serviceDetails -join ", " }
+    }
+
+    # 6. API Key Check
+    Write-Host "  [6/6] Checking API key configuration..." -NoNewline
+    $apiKeyFound = $false
+
+    if ($ApiKey) {
+        $apiKeyFound = $true
+        $script:GoogleApiKey = $ApiKey
+        Write-ColorOutput " OK (parameter)" -Color Green
+    }
+    elseif ($env:GOOGLE_GEOLOCATION_API_KEY) {
+        $apiKeyFound = $true
+        $script:GoogleApiKey = $env:GOOGLE_GEOLOCATION_API_KEY
+        Write-ColorOutput " OK (environment)" -Color Green
+    }
+    else {
+        $envPath = Join-Path $PSScriptRoot ".env"
+        if (Test-Path $envPath) {
+            $content = Get-Content $envPath -Raw -ErrorAction SilentlyContinue
+            if ($content -match 'GOOGLE_GEOLOCATION_API_KEY=(.+)') {
+                $key = $matches[1].Trim()
+                if ($key -and $key -ne 'your-api-key-here') {
+                    $apiKeyFound = $true
+                    $script:GoogleApiKey = $key
+                    Write-ColorOutput " OK (.env file)" -Color Green
+                }
             }
         }
     }
 
-    # 4. Prompt user interactively
-    Write-Host ""
-    Write-ColorOutput "════════════════════════════════════════════════════════════════" -Color Yellow
-    Write-ColorOutput "  Google Geolocation API Key Required" -Color Yellow
-    Write-ColorOutput "════════════════════════════════════════════════════════════════" -Color Yellow
-    Write-Host ""
-    Write-Host "WiFi BSSID geolocation requires a Google Geolocation API key."
-    Write-Host ""
-    Write-Host "To get a key:"
-    Write-Host "  1. Go to https://console.cloud.google.com"
-    Write-Host "  2. Create a project (or select existing)"
-    Write-Host "  3. Enable 'Geolocation API'"
-    Write-Host "  4. Go to 'Credentials' and create an API key"
-    Write-Host "  5. (Optional) Restrict the key to Geolocation API only"
-    Write-Host ""
-    Write-Host "Cost: ~`$5 per 1,000 requests"
-    Write-Host ""
-
-    $inputKey = Read-Host "Enter your Google Geolocation API key (or press Enter to skip WiFi check)"
-
-    if ($inputKey) {
-        # Optionally save to .env for future runs
-        $saveChoice = Read-Host "Save this key to .env file for future runs? (Y/N)"
-        if ($saveChoice -eq 'Y' -or $saveChoice -eq 'y') {
-            "GOOGLE_GEOLOCATION_API_KEY=$inputKey" | Out-File -FilePath $envPath -Encoding UTF8
-            Write-ColorOutput "API key saved to .env file" -Color Green
-        }
-        return $inputKey
+    if (-not $apiKeyFound) {
+        Write-ColorOutput " NOT CONFIGURED" -Color Yellow
+        $results["Google API Key"] = @{ Passed = $false; Details = "Required for WiFi geolocation" }
+    }
+    else {
+        $results["Google API Key"] = @{ Passed = $true }
     }
 
-    return $null
+    Write-Host ""
+
+    # Summary
+    $passedCount = ($results.Values | Where-Object { $_.Passed }).Count
+    $totalCount = $results.Count
+
+    if ($criticalFailed) {
+        Write-ColorOutput "  ✗ Critical requirements not met ($passedCount/$totalCount passed)" -Color Red
+        Write-Host ""
+        Write-Host "  Please resolve the issues above before continuing." -ForegroundColor Yellow
+        return @{ Success = $false; Results = $results; Critical = $true }
+    }
+    elseif ($passedCount -eq $totalCount) {
+        Write-ColorOutput "  ✓ All preflight checks passed ($passedCount/$totalCount)" -Color Green
+        return @{ Success = $true; Results = $results }
+    }
+    else {
+        Write-ColorOutput "  ⚡ Some checks need attention ($passedCount/$totalCount passed)" -Color Yellow
+        return @{ Success = $true; Results = $results; HasWarnings = $true }
+    }
+}
+
+function Invoke-ApiKeySetup {
+    Write-Host ""
+    Write-ColorOutput "════════════════════════════════════════════════════════════════" -Color Yellow
+    Write-ColorOutput "           Google Geolocation API Key Setup                     " -Color Yellow
+    Write-ColorOutput "════════════════════════════════════════════════════════════════" -Color Yellow
+    Write-Host ""
+    Write-Host "  WiFi BSSID geolocation is the most accurate detection method."
+    Write-Host "  It requires a Google Geolocation API key."
+    Write-Host ""
+    Write-ColorOutput "  Options:" -Color Cyan
+    Write-Host "    1. Enter an API key now"
+    Write-Host "    2. Skip WiFi geolocation (other checks will still run)"
+    Write-Host "    3. Learn how to get an API key"
+    Write-Host ""
+
+    $choice = Read-Host "  Enter choice (1-3)"
+
+    switch ($choice) {
+        "1" {
+            Write-Host ""
+            $key = Read-Host "  Enter your Google Geolocation API key"
+
+            if ($key) {
+                # Validate the key format (basic check)
+                if ($key -match '^AIza[0-9A-Za-z_-]{35}$') {
+                    Write-ColorOutput "  ✓ API key format looks valid" -Color Green
+                }
+                else {
+                    Write-ColorOutput "  ⚠ API key format may be incorrect (expected AIza...)" -Color Yellow
+                }
+
+                # Test the key
+                Write-Host "  Testing API key..." -NoNewline
+                $testResult = Test-ApiKey -Key $key
+
+                if ($testResult.Valid) {
+                    Write-ColorOutput " ✓ API key is working!" -Color Green
+
+                    # Offer to save
+                    Write-Host ""
+                    if (Get-UserConfirmation "  Save this key for future runs?") {
+                        $envPath = Join-Path $PSScriptRoot ".env"
+                        "GOOGLE_GEOLOCATION_API_KEY=$key" | Out-File -FilePath $envPath -Encoding UTF8
+                        Write-ColorOutput "  ✓ API key saved to .env file" -Color Green
+                    }
+
+                    $script:GoogleApiKey = $key
+                    return $true
+                }
+                else {
+                    Write-ColorOutput " ✗ API key test failed" -Color Red
+                    Write-Host "    Error: $($testResult.Error)" -ForegroundColor Yellow
+                    Write-Host ""
+
+                    if (Get-UserConfirmation "  Use this key anyway?") {
+                        $script:GoogleApiKey = $key
+                        return $true
+                    }
+                    return Invoke-ApiKeySetup  # Retry
+                }
+            }
+            return $false
+        }
+        "2" {
+            Write-Host ""
+            Write-ColorOutput "  Skipping WiFi geolocation. Other detection methods will still run." -Color Yellow
+            $script:SkipWifi = $true
+            return $true
+        }
+        "3" {
+            Show-ApiKeyInstructions
+            return Invoke-ApiKeySetup  # Return to menu
+        }
+        default {
+            return Invoke-ApiKeySetup  # Invalid choice, retry
+        }
+    }
+}
+
+function Show-ApiKeyInstructions {
+    Write-Host ""
+    Write-ColorOutput "════════════════════════════════════════════════════════════════" -Color Cyan
+    Write-ColorOutput "           How to Get a Google Geolocation API Key              " -Color Cyan
+    Write-ColorOutput "════════════════════════════════════════════════════════════════" -Color Cyan
+    Write-Host ""
+    Write-Host "  Step 1: Go to Google Cloud Console"
+    Write-ColorOutput "          https://console.cloud.google.com" -Color Blue
+    Write-Host ""
+    Write-Host "  Step 2: Create a new project (or select existing)"
+    Write-Host "          - Click the project dropdown at the top"
+    Write-Host "          - Click 'New Project'"
+    Write-Host "          - Enter a name and click 'Create'"
+    Write-Host ""
+    Write-Host "  Step 3: Enable the Geolocation API"
+    Write-Host "          - Go to 'APIs & Services' > 'Library'"
+    Write-Host "          - Search for 'Geolocation API'"
+    Write-Host "          - Click on it and press 'Enable'"
+    Write-Host ""
+    Write-Host "  Step 4: Create an API Key"
+    Write-Host "          - Go to 'APIs & Services' > 'Credentials'"
+    Write-Host "          - Click '+ Create Credentials' > 'API Key'"
+    Write-Host "          - Copy the generated key"
+    Write-Host ""
+    Write-Host "  Step 5 (Recommended): Restrict the API Key"
+    Write-Host "          - Click on your new API key"
+    Write-Host "          - Under 'API restrictions', select 'Restrict key'"
+    Write-Host "          - Select only 'Geolocation API'"
+    Write-Host "          - Click 'Save'"
+    Write-Host ""
+    Write-ColorOutput "  Cost: ~`$5 per 1,000 requests (first `$200/month free)" -Color Yellow
+    Write-Host ""
+
+    # Offer to open the URL
+    if (Get-UserConfirmation "  Open Google Cloud Console in your browser?") {
+        Start-Process "https://console.cloud.google.com/apis/library/geolocation.googleapis.com"
+    }
+
+    Wait-KeyPress
+}
+
+function Test-ApiKey {
+    param([string]$Key)
+
+    try {
+        # Make a minimal test request
+        $testPayload = @{
+            wifiAccessPoints = @(
+                @{ macAddress = "00:00:00:00:00:00"; signalStrength = -50 }
+            )
+        } | ConvertTo-Json
+
+        $response = Invoke-RestMethod -Uri "https://www.googleapis.com/geolocation/v1/geolocate?key=$Key" `
+            -Method Post -Body $testPayload -ContentType "application/json" -ErrorAction Stop
+
+        return @{ Valid = $true }
+    }
+    catch {
+        $errorMsg = $_.Exception.Message
+        if ($_.ErrorDetails.Message) {
+            try {
+                $errorJson = $_.ErrorDetails.Message | ConvertFrom-Json
+                $errorMsg = $errorJson.error.message
+            }
+            catch { }
+        }
+        return @{ Valid = $false; Error = $errorMsg }
+    }
 }
 
 # ============================================================================
@@ -242,11 +615,6 @@ function Get-ApiKey {
 # ============================================================================
 
 function Get-ExternalIPInfo {
-    <#
-    .SYNOPSIS
-        Gets external IP address and related information from multiple sources.
-    #>
-
     Write-ColorOutput "Fetching external IP information..." -Color Yellow
 
     $ipInfo = @{
@@ -265,7 +633,6 @@ function Get-ExternalIPInfo {
     }
 
     try {
-        # Primary: ip-api.com (includes ASN and VPN detection)
         $response = Invoke-RestMethod -Uri "http://ip-api.com/json/?fields=status,message,country,regionName,city,lat,lon,timezone,isp,org,as,mobile,proxy,hosting,query" -TimeoutSec 10
 
         if ($response.status -eq 'success') {
@@ -276,7 +643,7 @@ function Get-ExternalIPInfo {
             $ipInfo.Timezone = $response.timezone
             $ipInfo.ISP = $response.isp
             $ipInfo.Org = $response.org
-            $ipInfo.ASN = ($response.as -split ' ')[0]  # Extract just ASN number
+            $ipInfo.ASN = ($response.as -split ' ')[0]
             $ipInfo.IsDatacenter = $response.hosting
             $ipInfo.IsVpn = $response.proxy
             $ipInfo.Latitude = $response.lat
@@ -287,7 +654,6 @@ function Get-ExternalIPInfo {
         Write-ColorOutput "  Warning: ip-api.com lookup failed, trying backup..." -Color Yellow
 
         try {
-            # Backup: ipinfo.io
             $response = Invoke-RestMethod -Uri "https://ipinfo.io/json" -TimeoutSec 10
             $ipInfo.IP = $response.ip
             $ipInfo.City = $response.city
@@ -308,7 +674,6 @@ function Get-ExternalIPInfo {
         }
     }
 
-    # Check if ASN is in our known VPN/datacenter list
     if ($ipInfo.ASN -and $VpnDatacenterAsns.ContainsKey($ipInfo.ASN)) {
         $ipInfo.IsDatacenter = $true
         $ipInfo.AsnName = $VpnDatacenterAsns[$ipInfo.ASN]
@@ -318,13 +683,7 @@ function Get-ExternalIPInfo {
 }
 
 function Get-TimezoneCheck {
-    <#
-    .SYNOPSIS
-        Compares system timezone against IP-based geolocation.
-    #>
-    param(
-        [object]$IpInfo
-    )
+    param([object]$IpInfo)
 
     Write-ColorOutput "Checking timezone consistency..." -Color Yellow
 
@@ -343,35 +702,30 @@ function Get-TimezoneCheck {
         $result.SystemUtcOffset = $tz.BaseUtcOffset.TotalHours
         $result.IpTimezone = $IpInfo.Timezone
 
-        # Check if system timezone matches expected for IP location
         $isPacific = $result.SystemTimezone -match 'Pacific'
         $ipInCalifornia = $IpInfo.Region -match 'California'
 
-        # Determine expected timezone based on IP longitude
         if ($IpInfo.Longitude) {
             foreach ($tzName in $TimezoneMapping.Keys) {
-                $tz = $TimezoneMapping[$tzName]
-                if ($IpInfo.Longitude -ge $tz.LngMin -and $IpInfo.Longitude -lt $tz.LngMax) {
+                $tzData = $TimezoneMapping[$tzName]
+                if ($IpInfo.Longitude -ge $tzData.LngMin -and $IpInfo.Longitude -lt $tzData.LngMax) {
                     $result.ExpectedTimezone = $tzName
                     break
                 }
             }
         }
 
-        # Detect mismatch scenarios
         if ($ipInCalifornia -and -not $isPacific) {
             $result.Mismatch = $true
             $result.Details = "IP geolocates to California but system timezone is $($result.SystemTimezone)"
         }
         elseif ($result.ExpectedTimezone -and $result.SystemTimezone -ne $result.ExpectedTimezone) {
-            # Allow some flexibility (e.g., Arizona doesn't observe DST)
             if (-not ($result.SystemTimezone -match 'Arizona|Hawaii')) {
                 $result.Mismatch = $true
                 $result.Details = "System timezone ($($result.SystemTimezone)) doesn't match expected ($($result.ExpectedTimezone)) for IP location"
             }
         }
 
-        # Check for recent timezone changes (suspicious if changed recently)
         try {
             $tzEvents = Get-WinEvent -FilterHashtable @{
                 LogName = 'System'
@@ -396,11 +750,6 @@ function Get-TimezoneCheck {
 }
 
 function Get-WifiNetworks {
-    <#
-    .SYNOPSIS
-        Scans for nearby WiFi networks and returns BSSID/signal strength pairs.
-    #>
-
     Write-ColorOutput "Scanning nearby WiFi networks..." -Color Yellow
 
     try {
@@ -468,15 +817,6 @@ function Invoke-GeolocationApi {
 }
 
 function Get-NetworkHopAnalysis {
-    <#
-    .SYNOPSIS
-        Analyzes network path for VPN indicators (including router-level VPN).
-        Detects anomalies like:
-        - First hop to datacenter/VPN ASN
-        - Unusual geographic routing
-        - Missing local ISP hops
-    #>
-
     Write-ColorOutput "Analyzing network path (traceroute)..." -Color Yellow
 
     $result = @{
@@ -489,7 +829,6 @@ function Get-NetworkHopAnalysis {
     }
 
     try {
-        # Use tracert to a well-known target
         $targets = @('8.8.8.8', '1.1.1.1')
         $tracertOutput = $null
 
@@ -508,12 +847,10 @@ function Get-NetworkHopAnalysis {
 
         $hopNumber = 0
         foreach ($line in $tracertOutput) {
-            # Parse tracert output: "  1    <1 ms    <1 ms    <1 ms  192.168.1.1"
             if ($line -match '^\s*(\d+)\s+.*?(\d+\.\d+\.\d+\.\d+)') {
                 $hopNumber = [int]$matches[1]
                 $hopIp = $matches[2]
 
-                # Skip private IPs
                 $isPrivate = $hopIp -match '^(10\.|172\.(1[6-9]|2[0-9]|3[01])\.|192\.168\.|127\.)'
 
                 $hopInfo = @{
@@ -524,18 +861,15 @@ function Get-NetworkHopAnalysis {
                     Org = $null
                 }
 
-                # Look up ASN for public IPs
                 if (-not $isPrivate -and -not $result.FirstPublicHop) {
                     $result.FirstPublicHop = $hopIp
 
                     try {
-                        # Quick ASN lookup
                         $asnLookup = Invoke-RestMethod -Uri "http://ip-api.com/json/$hopIp`?fields=as,org,isp,hosting,proxy" -TimeoutSec 5
                         $hopInfo.ASN = ($asnLookup.as -split ' ')[0]
                         $hopInfo.Org = $asnLookup.org
                         $result.FirstPublicHopAsn = $hopInfo.ASN
 
-                        # Check if first public hop is a known VPN/datacenter
                         if ($VpnDatacenterAsns.ContainsKey($hopInfo.ASN)) {
                             $result.RouterVpnLikely = $true
                             $result.Details += "First public hop ($hopIp) is $($VpnDatacenterAsns[$hopInfo.ASN])"
@@ -551,14 +885,11 @@ function Get-NetworkHopAnalysis {
 
                 $result.Hops += $hopInfo
 
-                # Only analyze first 5 hops
                 if ($hopNumber -ge 5) { break }
             }
         }
 
-        # Additional analysis: if we have very few hops to a major service, suspicious
         if ($result.Hops.Count -le 3 -and $result.FirstPublicHopAsn) {
-            # Unusually short path might indicate VPN/proxy
             $result.Details += "Unusually short network path detected"
         }
     }
@@ -570,17 +901,11 @@ function Get-NetworkHopAnalysis {
 }
 
 function Get-VpnAdapters {
-    <#
-    .SYNOPSIS
-        Checks for VPN-related network adapters.
-    #>
-
     Write-ColorOutput "Checking for VPN network adapters..." -Color Yellow
 
     $found = @()
 
     try {
-        # Active adapters
         $adapters = Get-NetAdapter -ErrorAction SilentlyContinue | Where-Object {
             $desc = $_.InterfaceDescription
             $VpnAdapterPatterns | Where-Object { $desc -match $_ }
@@ -595,7 +920,6 @@ function Get-VpnAdapters {
             }
         }
 
-        # Also check disabled/hidden adapters via WMI
         $wmiAdapters = Get-WmiObject Win32_NetworkAdapter -ErrorAction SilentlyContinue | Where-Object {
             $desc = $_.Description
             $VpnAdapterPatterns | Where-Object { $desc -match $_ }
@@ -620,11 +944,6 @@ function Get-VpnAdapters {
 }
 
 function Get-VpnProcesses {
-    <#
-    .SYNOPSIS
-        Checks for running VPN client processes.
-    #>
-
     Write-ColorOutput "Checking for VPN processes..." -Color Yellow
 
     $found = @()
@@ -651,16 +970,10 @@ function Get-VpnProcesses {
 }
 
 function Get-VpnRegistryEntries {
-    <#
-    .SYNOPSIS
-        Scans registry for installed VPN software.
-    #>
-
     Write-ColorOutput "Scanning registry for VPN software..." -Color Yellow
 
     $found = @()
 
-    # Check specific VPN paths
     foreach ($path in $VpnRegistryPaths) {
         if (Test-Path $path) {
             $found += @{
@@ -670,7 +983,6 @@ function Get-VpnRegistryEntries {
         }
     }
 
-    # Check uninstall entries
     $uninstallPaths = @(
         'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\*',
         'HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\*',
@@ -710,7 +1022,6 @@ function Get-VpnRegistryEntries {
         Write-ColorOutput "  Error scanning registry: $_" -Color Red
     }
 
-    # Check for OpenVPN config files
     $configPaths = @(
         "$env:USERPROFILE\OpenVPN\config",
         "$env:ProgramFiles\OpenVPN\config",
@@ -735,11 +1046,6 @@ function Get-VpnRegistryEntries {
 }
 
 function Get-VpnDnsCheck {
-    <#
-    .SYNOPSIS
-        Checks DNS configuration for VPN indicators.
-    #>
-
     Write-ColorOutput "Checking DNS configuration..." -Color Yellow
 
     $result = @{
@@ -765,7 +1071,6 @@ function Get-VpnDnsCheck {
                     }
                 }
 
-                # Check for internal/private DNS ranges often used by VPNs
                 if ($server -match '^10\.' -or $server -match '^100\.64\.') {
                     $result.VpnDnsFound += @{
                         Interface = $config.InterfaceAlias
@@ -784,11 +1089,6 @@ function Get-VpnDnsCheck {
 }
 
 function Get-RoutingTableCheck {
-    <#
-    .SYNOPSIS
-        Checks routing table for VPN indicators.
-    #>
-
     Write-ColorOutput "Checking routing table..." -Color Yellow
 
     $result = @{
@@ -800,7 +1100,6 @@ function Get-RoutingTableCheck {
     try {
         $routes = Get-NetRoute -AddressFamily IPv4 -ErrorAction SilentlyContinue
 
-        # Check for classic VPN full-tunnel pattern
         $route1 = $routes | Where-Object { $_.DestinationPrefix -eq '0.0.0.0/1' }
         $route2 = $routes | Where-Object { $_.DestinationPrefix -eq '128.0.0.0/1' }
 
@@ -809,12 +1108,10 @@ function Get-RoutingTableCheck {
             $result.SuspiciousRoutes += "Full tunnel override: 0.0.0.0/1 + 128.0.0.0/1"
         }
 
-        # Check default gateway
         $defaultRoute = $routes | Where-Object { $_.DestinationPrefix -eq '0.0.0.0/0' }
         if ($defaultRoute) {
             $result.DefaultGateway = $defaultRoute.NextHop | Select-Object -First 1
 
-            # Check if default route goes through a VPN adapter
             $gwAdapter = Get-NetAdapter -InterfaceIndex $defaultRoute.InterfaceIndex -ErrorAction SilentlyContinue
             if ($gwAdapter) {
                 foreach ($pattern in $VpnAdapterPatterns) {
@@ -826,8 +1123,6 @@ function Get-RoutingTableCheck {
             }
         }
 
-        # Look for routes to known VPN server ranges
-        $vpnRanges = @('10.0.0.0/8', '100.64.0.0/10')  # Common VPN internal ranges
         foreach ($route in $routes) {
             if ($route.DestinationPrefix -match '^(10\.|100\.64\.)' -and $route.NextHop -ne '0.0.0.0') {
                 $result.SuspiciousRoutes += "Route to VPN range: $($route.DestinationPrefix) via $($route.NextHop)"
@@ -842,11 +1137,6 @@ function Get-RoutingTableCheck {
 }
 
 function Get-WindowsLocationServices {
-    <#
-    .SYNOPSIS
-        Attempts to get location from Windows Location Services.
-    #>
-
     Write-ColorOutput "Checking Windows Location Services..." -Color Yellow
 
     $result = @{
@@ -863,7 +1153,6 @@ function Get-WindowsLocationServices {
         $watcher = New-Object System.Device.Location.GeoCoordinateWatcher
         $watcher.Start()
 
-        # Wait for position (max 10 seconds)
         $timeout = 10
         $elapsed = 0
         while ($watcher.Status -ne 'Ready' -and $elapsed -lt $timeout) {
@@ -885,18 +1174,13 @@ function Get-WindowsLocationServices {
         $watcher.Stop()
     }
     catch {
-        Write-ColorOutput "  Windows Location Services not available: $_" -Color Yellow
+        Write-ColorOutput "  Windows Location Services not available" -Color Yellow
     }
 
     return $result
 }
 
 function Get-LatencyAnalysis {
-    <#
-    .SYNOPSIS
-        Analyzes latency to various endpoints to detect location inconsistencies.
-    #>
-
     Write-ColorOutput "Performing latency analysis..." -Color Yellow
 
     $result = @{
@@ -904,14 +1188,6 @@ function Get-LatencyAnalysis {
         Anomalies = @()
     }
 
-    # Test endpoints in different regions
-    $endpoints = @(
-        @{ Name = "West US (California)"; Host = "west-us.azure.com"; ExpectedFromCA = @(10, 50) }
-        @{ Name = "East US"; Host = "east-us.azure.com"; ExpectedFromCA = @(60, 120) }
-        @{ Name = "Europe"; Host = "eu.azure.com"; ExpectedFromCA = @(140, 200) }
-    )
-
-    # Alternative: use common reliable endpoints
     $testEndpoints = @(
         @{ Name = "Google DNS"; Host = "8.8.8.8" }
         @{ Name = "Cloudflare"; Host = "1.1.1.1" }
@@ -968,9 +1244,50 @@ function Get-ReverseGeocode {
 
 $startTime = Get-Date
 
+# Show banner
+Write-Banner
+
+# Run preflight checks unless skipped
+if (-not $SkipPreflight) {
+    $preflightResult = Invoke-PreflightChecks
+
+    if ($preflightResult.Critical) {
+        Write-Host ""
+        Write-ColorOutput "Cannot continue due to critical failures." -Color Red
+        Wait-KeyPress "Press any key to exit..."
+        exit 1
+    }
+
+    # Handle missing API key
+    if (-not $script:GoogleApiKey -and -not $SkipWifi) {
+        Write-Host ""
+        if (-not (Invoke-ApiKeySetup)) {
+            Write-Host ""
+            Write-ColorOutput "Continuing without WiFi geolocation..." -Color Yellow
+            $script:SkipWifi = $true
+        }
+    }
+
+    Write-Host ""
+    if (-not (Get-UserConfirmation "Ready to start the detection scan?")) {
+        Write-ColorOutput "Scan cancelled." -Color Yellow
+        exit 0
+    }
+}
+else {
+    # When skipping preflight, still need to get API key
+    if ($ApiKey) {
+        $script:GoogleApiKey = $ApiKey
+    }
+    elseif ($env:GOOGLE_GEOLOCATION_API_KEY) {
+        $script:GoogleApiKey = $env:GOOGLE_GEOLOCATION_API_KEY
+    }
+}
+
+# Clear screen and show scan header
+Clear-Host
 Write-ColorOutput "╔══════════════════════════════════════════════════════════════╗" -Color Cyan
-Write-ColorOutput "║     VPN LOCATION SPOOFING DETECTION - COMPREHENSIVE SCAN     ║" -Color Cyan
-Write-ColorOutput "║                      Internal Testing v2.0                   ║" -Color Cyan
+Write-ColorOutput "║         RUNNING VPN LOCATION SPOOFING DETECTION              ║" -Color Cyan
 Write-ColorOutput "╚══════════════════════════════════════════════════════════════╝" -Color Cyan
 Write-Host ""
 Write-ColorOutput "Scan started: $startTime" -Color Gray
@@ -981,8 +1298,8 @@ $results = @{
     Timestamp = $startTime.ToString("o")
     ComputerName = $env:COMPUTERNAME
     Username = $env:USERNAME
+    ScriptVersion = $ScriptVersion
 
-    # Detection results
     WifiGeolocation = $null
     IpInfo = $null
     TimezoneCheck = $null
@@ -995,13 +1312,11 @@ $results = @{
     WindowsLocation = $null
     LatencyAnalysis = $null
 
-    # Scoring
     Indicators = @()
     TotalScore = 0
     MaxScore = 300
     Confidence = "LOW"
 
-    # Final determination
     InCalifornia = $null
     PhysicalLocation = $null
     IpLocation = $null
@@ -1011,7 +1326,7 @@ $results = @{
 # Run All Detection Checks
 # ============================================================================
 
-# 1. Get External IP Information (includes ASN check)
+# 1. Get External IP Information
 Write-Section "1. External IP Analysis"
 $results.IpInfo = Get-ExternalIPInfo
 
@@ -1053,80 +1368,79 @@ else {
 }
 
 # 3. WiFi BSSID Geolocation
-if (-not $SkipWifi) {
+if (-not $script:SkipWifi -and $script:GoogleApiKey) {
     Write-Section "3. WiFi BSSID Geolocation (Physical Location)"
 
-    $apiKey = Get-ApiKey
-    if ($apiKey) {
-        $accessPoints = Get-WifiNetworks
+    $accessPoints = Get-WifiNetworks
 
-        if ($accessPoints.Count -gt 0) {
-            Write-Host "  Found $($accessPoints.Count) nearby WiFi access points"
+    if ($accessPoints.Count -gt 0) {
+        Write-Host "  Found $($accessPoints.Count) nearby WiFi access points"
 
-            $geoResult = Invoke-GeolocationApi -AccessPoints $accessPoints -Key $apiKey
+        $geoResult = Invoke-GeolocationApi -AccessPoints $accessPoints -Key $script:GoogleApiKey
 
-            if ($geoResult -and $geoResult.location) {
-                $wifiLat = $geoResult.location.lat
-                $wifiLng = $geoResult.location.lng
-                $wifiAccuracy = $geoResult.accuracy
+        if ($geoResult -and $geoResult.location) {
+            $wifiLat = $geoResult.location.lat
+            $wifiLng = $geoResult.location.lng
+            $wifiAccuracy = $geoResult.accuracy
 
-                $results.WifiGeolocation = @{
-                    Latitude = $wifiLat
-                    Longitude = $wifiLng
-                    Accuracy = $wifiAccuracy
-                    AccessPointCount = $accessPoints.Count
-                }
+            $results.WifiGeolocation = @{
+                Latitude = $wifiLat
+                Longitude = $wifiLng
+                Accuracy = $wifiAccuracy
+                AccessPointCount = $accessPoints.Count
+            }
 
-                Write-Host "  Physical Location: $wifiLat, $wifiLng (±${wifiAccuracy}m)"
+            Write-Host "  Physical Location: $wifiLat, $wifiLng (±${wifiAccuracy}m)"
 
-                $wifiInCA = Test-InCalifornia -Lat $wifiLat -Lng $wifiLng
-                $results.InCalifornia = $wifiInCA
+            $wifiInCA = Test-InCalifornia -Lat $wifiLat -Lng $wifiLng
+            $results.InCalifornia = $wifiInCA
 
-                # Get location name
-                $locInfo = Get-ReverseGeocode -Lat $wifiLat -Lng $wifiLng
-                if ($locInfo -and $locInfo.address) {
-                    $city = $locInfo.address.city ?? $locInfo.address.town ?? $locInfo.address.village ?? "Unknown"
-                    $state = $locInfo.address.state ?? "Unknown"
-                    $results.PhysicalLocation = "$city, $state"
-                    Write-Host "  Resolved: $($results.PhysicalLocation)"
-                }
+            $locInfo = Get-ReverseGeocode -Lat $wifiLat -Lng $wifiLng
+            if ($locInfo -and $locInfo.address) {
+                $city = $locInfo.address.city ?? $locInfo.address.town ?? $locInfo.address.village ?? "Unknown"
+                $state = $locInfo.address.state ?? "Unknown"
+                $results.PhysicalLocation = "$city, $state"
+                Write-Host "  Resolved: $($results.PhysicalLocation)"
+            }
 
-                if (-not $wifiInCA) {
-                    Write-ColorOutput "  [CRITICAL] Device physically located OUTSIDE California!" -Color Red
-                    $results.Indicators += @{ Name = "WiFi Geolocation Outside CA"; Score = 60; Confidence = "CRITICAL" }
-                    $results.TotalScore += 60
-                }
-                else {
-                    Write-ColorOutput "  [OK] Device physically in California" -Color Green
-                }
-
-                # Check if WiFi location differs significantly from IP location
-                if ($results.IpInfo.Latitude -and $results.IpInfo.Longitude) {
-                    $latDiff = [math]::Abs($wifiLat - $results.IpInfo.Latitude)
-                    $lngDiff = [math]::Abs($wifiLng - $results.IpInfo.Longitude)
-
-                    # More than 2 degrees difference is suspicious (roughly 100+ miles)
-                    if ($latDiff -gt 2 -or $lngDiff -gt 2) {
-                        Write-ColorOutput "  [ALERT] WiFi location differs significantly from IP location!" -Color Red
-                        $results.Indicators += @{ Name = "WiFi/IP Location Mismatch"; Score = 50; Confidence = "HIGH" }
-                        $results.TotalScore += 50
-                    }
-                }
+            if (-not $wifiInCA) {
+                Write-ColorOutput "  [CRITICAL] Device physically located OUTSIDE California!" -Color Red
+                $results.Indicators += @{ Name = "WiFi Geolocation Outside CA"; Score = 60; Confidence = "CRITICAL" }
+                $results.TotalScore += 60
             }
             else {
-                Write-ColorOutput "  Could not determine location from WiFi" -Color Yellow
+                Write-ColorOutput "  [OK] Device physically in California" -Color Green
+            }
+
+            if ($results.IpInfo.Latitude -and $results.IpInfo.Longitude) {
+                $latDiff = [math]::Abs($wifiLat - $results.IpInfo.Latitude)
+                $lngDiff = [math]::Abs($wifiLng - $results.IpInfo.Longitude)
+
+                if ($latDiff -gt 2 -or $lngDiff -gt 2) {
+                    Write-ColorOutput "  [ALERT] WiFi location differs significantly from IP location!" -Color Red
+                    $results.Indicators += @{ Name = "WiFi/IP Location Mismatch"; Score = 50; Confidence = "HIGH" }
+                    $results.TotalScore += 50
+                }
             }
         }
         else {
-            Write-ColorOutput "  No WiFi networks found (device may be on Ethernet only)" -Color Yellow
+            Write-ColorOutput "  Could not determine location from WiFi" -Color Yellow
         }
     }
     else {
-        Write-ColorOutput "  [SKIP] No API key provided for WiFi geolocation" -Color Yellow
+        Write-ColorOutput "  No WiFi networks found (device may be on Ethernet only)" -Color Yellow
     }
 }
+elseif ($script:SkipWifi) {
+    Write-Section "3. WiFi BSSID Geolocation (Physical Location)"
+    Write-ColorOutput "  [SKIP] WiFi geolocation skipped" -Color Yellow
+}
+else {
+    Write-Section "3. WiFi BSSID Geolocation (Physical Location)"
+    Write-ColorOutput "  [SKIP] No API key configured" -Color Yellow
+}
 
-# 4. Network Hop Analysis (Router VPN Detection)
+# 4. Network Hop Analysis
 Write-Section "4. Network Path Analysis (Router VPN Detection)"
 $results.NetworkHops = Get-NetworkHopAnalysis
 
@@ -1345,6 +1659,9 @@ if ($OutputJson) {
     Write-ColorOutput "JSON OUTPUT:" -Color Cyan
     $results | ConvertTo-Json -Depth 5
 }
+
+Write-Host ""
+Wait-KeyPress "Press any key to exit..."
 
 # Exit code based on confidence
 switch ($results.Confidence) {

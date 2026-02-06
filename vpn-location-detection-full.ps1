@@ -186,16 +186,54 @@ function Write-Section {
 }
 
 function Get-ApiKey {
+    # 1. Check command line parameter
     if ($ApiKey) { return $ApiKey }
+
+    # 2. Check environment variable
     if ($env:GOOGLE_GEOLOCATION_API_KEY) { return $env:GOOGLE_GEOLOCATION_API_KEY }
 
+    # 3. Check .env file in script directory
     $envPath = Join-Path $PSScriptRoot ".env"
     if (Test-Path $envPath) {
         $content = Get-Content $envPath -Raw
         if ($content -match 'GOOGLE_GEOLOCATION_API_KEY=(.+)') {
-            return $matches[1].Trim()
+            $key = $matches[1].Trim()
+            if ($key -and $key -ne 'your-api-key-here') {
+                return $key
+            }
         }
     }
+
+    # 4. Prompt user interactively
+    Write-Host ""
+    Write-ColorOutput "════════════════════════════════════════════════════════════════" -Color Yellow
+    Write-ColorOutput "  Google Geolocation API Key Required" -Color Yellow
+    Write-ColorOutput "════════════════════════════════════════════════════════════════" -Color Yellow
+    Write-Host ""
+    Write-Host "WiFi BSSID geolocation requires a Google Geolocation API key."
+    Write-Host ""
+    Write-Host "To get a key:"
+    Write-Host "  1. Go to https://console.cloud.google.com"
+    Write-Host "  2. Create a project (or select existing)"
+    Write-Host "  3. Enable 'Geolocation API'"
+    Write-Host "  4. Go to 'Credentials' and create an API key"
+    Write-Host "  5. (Optional) Restrict the key to Geolocation API only"
+    Write-Host ""
+    Write-Host "Cost: ~`$5 per 1,000 requests"
+    Write-Host ""
+
+    $inputKey = Read-Host "Enter your Google Geolocation API key (or press Enter to skip WiFi check)"
+
+    if ($inputKey) {
+        # Optionally save to .env for future runs
+        $saveChoice = Read-Host "Save this key to .env file for future runs? (Y/N)"
+        if ($saveChoice -eq 'Y' -or $saveChoice -eq 'y') {
+            "GOOGLE_GEOLOCATION_API_KEY=$inputKey" | Out-File -FilePath $envPath -Encoding UTF8
+            Write-ColorOutput "API key saved to .env file" -Color Green
+        }
+        return $inputKey
+    }
+
     return $null
 }
 

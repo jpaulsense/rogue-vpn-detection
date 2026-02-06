@@ -1,0 +1,32 @@
+# Environment files with secrets
+.env
+*.env
+
+# Distribution folders
+dist-windows/
+
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Compiled binaries
+wifi-scanner
+wifi-scanner-v2
+wifi-scanner-v3
+*.exe
+
+# Output files
+*.json
+*.log
+wifi-output.*
+wifi-debug.*
+
+# Zip files (distribute separately)
+*.zip

@@ -1157,6 +1157,8 @@ function Get-WindowsLocationServices {
         Longitude = $null
         Accuracy = $null
         Source = $null
+        City = $null
+        State = $null
     }
 
     try {
@@ -1180,6 +1182,17 @@ function Get-WindowsLocationServices {
                 $result.Longitude = $position.Longitude
                 $result.Accuracy = $position.HorizontalAccuracy
                 $result.Source = "Windows Location Services"
+
+                # Reverse geocode to get city/state
+                try {
+                    $geoUri = "https://nominatim.openstreetmap.org/reverse?lat=$($position.Latitude)&lon=$($position.Longitude)&format=json"
+                    $geoResponse = Invoke-RestMethod -Uri $geoUri -Headers @{"User-Agent" = "VPN-Detection-Script/1.0"} -TimeoutSec 5 -ErrorAction SilentlyContinue
+                    if ($geoResponse -and $geoResponse.address) {
+                        $result.City = $geoResponse.address.city ?? $geoResponse.address.town ?? $geoResponse.address.village ?? $geoResponse.address.county
+                        $result.State = $geoResponse.address.state
+                    }
+                }
+                catch { }
             }
         }
 
@@ -1563,8 +1576,14 @@ Write-Section "10. Windows Location Services"
 $results.WindowsLocation = Get-WindowsLocationServices
 
 if ($results.WindowsLocation.Available) {
-    Write-Host "  Location: $($results.WindowsLocation.Latitude), $($results.WindowsLocation.Longitude)"
+    Write-Host "  Coordinates: $($results.WindowsLocation.Latitude), $($results.WindowsLocation.Longitude)"
     Write-Host "  Accuracy: $($results.WindowsLocation.Accuracy)m"
+
+    # Show city/state if available
+    if ($results.WindowsLocation.City -or $results.WindowsLocation.State) {
+        $locationStr = @($results.WindowsLocation.City, $results.WindowsLocation.State) | Where-Object { $_ } | Join-String -Separator ", "
+        Write-Host "  Resolved: $locationStr"
+    }
 
     $winLocInCA = Test-InCalifornia -Lat $results.WindowsLocation.Latitude -Lng $results.WindowsLocation.Longitude
 

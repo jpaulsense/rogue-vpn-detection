@@ -1072,11 +1072,22 @@ function Get-VpnDnsCheck {
                     }
                 }
 
-                if ($server -match '^10\.' -or $server -match '^100\.64\.') {
+                # Check for VPN-specific private ranges (not general RFC1918)
+                # 10.0.0.0/24, 10.2.0.0/24, 10.8.0.0/24, 10.255.255.0/24 are common VPN ranges
+                # Skip typical corporate/home LAN ranges like 10.x.x.0/24 where x > 10
+                if ($server -match '^10\.(0|2|8|255)\.') {
                     $result.VpnDnsFound += @{
                         Interface = $config.InterfaceAlias
                         Server = $server
-                        Note = "Private range often used by VPNs"
+                        Note = "Private range commonly used by VPNs"
+                    }
+                }
+                # Carrier-grade NAT range used by some VPNs
+                if ($server -match '^100\.64\.') {
+                    $result.VpnDnsFound += @{
+                        Interface = $config.InterfaceAlias
+                        Server = $server
+                        Note = "CGNAT range often used by VPNs"
                     }
                 }
             }
@@ -1199,7 +1210,9 @@ function Get-LatencyAnalysis {
         try {
             $ping = Test-Connection -ComputerName $endpoint.Host -Count 3 -ErrorAction SilentlyContinue
             if ($ping) {
-                $avgLatency = ($ping | Measure-Object -Property ResponseTime -Average).Average
+                # PowerShell 7 uses 'Latency', PowerShell 5 uses 'ResponseTime'
+                $latencyProp = if ($ping[0].PSObject.Properties['Latency']) { 'Latency' } else { 'ResponseTime' }
+                $avgLatency = ($ping | Measure-Object -Property $latencyProp -Average).Average
                 $result.Measurements += @{
                     Endpoint = $endpoint.Name
                     Host = $endpoint.Host

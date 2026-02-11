@@ -195,7 +195,7 @@ function Write-Section {
 }
 
 function Write-Banner {
-    Clear-Host
+    try { Clear-Host } catch { }  # Ignore errors in non-interactive terminals
     Write-ColorOutput "╔══════════════════════════════════════════════════════════════╗" -Color Cyan
     Write-ColorOutput "║                                                              ║" -Color Cyan
     Write-ColorOutput "║     VPN LOCATION SPOOFING DETECTION v$ScriptVersion               ║" -Color Cyan
@@ -920,12 +920,13 @@ function Get-VpnAdapters {
             }
         }
 
-        $wmiAdapters = Get-WmiObject Win32_NetworkAdapter -ErrorAction SilentlyContinue | Where-Object {
+        # Use Get-CimInstance (PowerShell 7 compatible) instead of deprecated Get-WmiObject
+        $cimAdapters = Get-CimInstance Win32_NetworkAdapter -ErrorAction SilentlyContinue | Where-Object {
             $desc = $_.Description
             $VpnAdapterPatterns | Where-Object { $desc -match $_ }
         }
 
-        foreach ($adapter in $wmiAdapters) {
+        foreach ($adapter in $cimAdapters) {
             if (-not ($found | Where-Object { $_.Description -eq $adapter.Description })) {
                 $found += @{
                     Name = $adapter.NetConnectionID
@@ -1285,7 +1286,7 @@ else {
 }
 
 # Clear screen and show scan header
-Clear-Host
+try { Clear-Host } catch { }  # Ignore errors in non-interactive terminals
 Write-ColorOutput "╔══════════════════════════════════════════════════════════════╗" -Color Cyan
 Write-ColorOutput "║         RUNNING VPN LOCATION SPOOFING DETECTION              ║" -Color Cyan
 Write-ColorOutput "╚══════════════════════════════════════════════════════════════╝" -Color Cyan

@@ -30,3 +30,5 @@ wifi-debug.*
 
 # Zip files (distribute separately)
 *.zip
+WiFiScanner.app/
+.DS_Store

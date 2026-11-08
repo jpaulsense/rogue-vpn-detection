@@ -3,10 +3,9 @@
 
 WHAT RUNS WHERE, AND WHY IT IS SHAPED THIS WAY
 
-  Job (console, time-triggered)
+  Job (console-created, time-triggered)
     -> Playbook "Device Location Sweep"
-         task 1  DeviceLocationSweep   automation, does the whole sweep
-         task 2  closeInvestigation    builtin, or the job sticks in Running
+         task 1  DeviceLocationSweep   the whole sweep, and closes the container
 
   The automation does everything rather than the playbook orchestrating four
   tasks. That is deliberate. Every context path between playbook tasks is a
@@ -14,6 +13,11 @@ WHAT RUNS WHERE, AND WHY IT IS SHAPED THIS WAY
   reports Completed, and the run looks green with no data in it. One task with
   one scalar output has almost no surface for that. Decompose later if the
   canvas visibility is worth the risk.
+
+  The close is inside the automation for a different reason: a playbook task
+  carrying the builtin fails on this tenant whatever shape it is given. The
+  job itself has to be created in the console; --job here produces one that
+  cannot run. Both are measured, and both are in xsiam/README.md.
 
 CREDENTIALS
   The collector token lives in an XSOAR list, not in the playbook or the
@@ -23,7 +27,7 @@ Usage:
     ./deploy_playbook.py --list        store collector creds in an XSOAR list
     ./deploy_playbook.py --automation  create/update the automation
     ./deploy_playbook.py --playbook    create/update the playbook
-    ./deploy_playbook.py --all
+    ./deploy_playbook.py --all         all three of the above; NOT the job
 """
 import argparse
 import io
@@ -51,7 +55,7 @@ AUTOMATION_CODE = r'''
 import json, gzip, time, traceback
 
 LIST_NAME = "DeviceLocationCollector"
-CODE_VERSION = "v4-params"
+CODE_VERSION = "v6-close"
 FIELDS = ["scanned_at","host_name","agent_id","confidence","score","indicators",
           "wifi_method","bssid_count","bssids","timezone_key","utc_offset_hours",
           "first_public_hop","anchor_type","anchor_rtts","anycast_reachable",
@@ -263,12 +267,21 @@ def main():
         if not (st or {}).get("endpoints_in_progress") and (st or {}).get("endpoints_pending"):
             break
 
-    # 5. results -> rows
+    # 5. results -> rows, ONE PER ENDPOINT
+    #
+    # MEASURED 2026-11-08: the raw API returns exactly one entry per endpoint
+    # for a given action -- action 110, nine endpoints, nine entries, read
+    # straight from scripts/get_script_execution_results. The first run through
+    # this path still wrote 41 identical rows per endpoint, 41 being the field
+    # count, so something between the integration command and this list
+    # multiplies entries. Keying on endpoint_id makes the shape irrelevant, and
+    # the beacon below reports what was actually received rather than leaving
+    # it to be inferred from the row count afterwards.
     res = _cmd("core-get-script-execution-results", {"action_id": action_id},
                "Core.ScriptResult")
     res = res[0] if isinstance(res, list) and res else res
     results = (res or {}).get("results") or []
-    rows = []
+    by_endpoint = {}
     for r in results:
         parsed = _extract(r)
         if not parsed:
@@ -283,7 +296,11 @@ def main():
             if v is None or v == "":
                 continue
             row[f] = v if isinstance(v, (str, int, float, bool)) else json.dumps(v)
-        rows.append(row)
+        key = r.get("endpoint_id") or r.get("endpoint_name") or len(by_endpoint)
+        by_endpoint.setdefault(key, row)
+    rows = list(by_endpoint.values())
+    _beacon("collect", "results=%d rows=%d restype=%s"
+            % (len(results), len(rows), type(res).__name__))
 
     if not rows:
         return CommandResults(
@@ -304,6 +321,25 @@ def main():
     if resp.status_code != 200:
         raise RuntimeError("collector returned %s: %s"
                            % (resp.status_code, resp.text[:300]))
+
+    # 7. close the job's container from HERE, not from a playbook task.
+    #
+    # MEASURED 2026-11-08 over three runs: a task carrying
+    # scriptId "Builtin|||closeInvestigation" fails in 200-300ms with an EMPTY
+    # errors array, copied field-for-field from the shipping Phishing - Core
+    # task, with and without `iscommand`. Neither spelling of that flag even
+    # survives playbook/save -- it reads back None -- so the task form is not
+    # reachable from the API on this tenant. The same builtin called from
+    # inside the automation works. It matters because a job container that
+    # never closes leaves one open investigation per run, and on a job with
+    # shouldTriggerNew=False it stops the schedule dead after the first run.
+    try:
+        demisto.executeCommand("closeInvestigation", {
+            "closeReason": "Resolved",
+            "closeNotes": "Device location sweep completed."})
+        _beacon("closed", "rows=%d" % len(rows))
+    except Exception as exc:               # noqa: BLE001 - never fail the sweep
+        _beacon("close_failed", str(exc)[:200])
 
     moved = [r["host_name"] for r in rows if r.get("anycast_reachable") == 0]
     return CommandResults(
@@ -432,9 +468,11 @@ def make_playbook():
         deserialized
       * tasks reference their script by `scriptId`, not `script`. A `script` key
         saves 200, renders correctly, and every task does nothing.
-      * closeInvestigation is a BUILTIN, not an automation. It is absent from all
-        537 automations on this tenant but present in shipping playbooks as
-        scriptId "Builtin|||closeInvestigation" with brand "Builtin".
+      * closeInvestigation is a BUILTIN, not an automation. It is absent from
+        all 537 automations on this tenant and present in shipping playbooks as
+        scriptId "Builtin|||closeInvestigation" with brand "Builtin" -- and
+        MEASURED 2026-11-08, reproducing that exact shape from the API still
+        errors every run. The automation closes the container instead.
     """
     import uuid
 
@@ -448,8 +486,13 @@ def make_playbook():
     def tid(n):
         return str(uuid.uuid5(uuid.NAMESPACE_URL, "%s/task/%d" % (PLAYBOOK, n)))
 
-    t0, t1, t2 = tid(0), tid(1), tid(2)
+    t0, t1 = tid(0), tid(1)
 
+    # ONE REAL TASK. Closing the container is done by the automation itself,
+    # not by a second task -- see the long note at step 7 of AUTOMATION_CODE.
+    # A task carrying scriptId "Builtin|||closeInvestigation" errors in under a
+    # third of a second with an empty errors array on this tenant, three runs
+    # in a row, copied field-for-field from a shipping playbook.
     tasks = {
         "0": {"id": "0", "taskid": t0, "type": "start",
               "task": {"id": t0, "version": -1, "type": "start"},
@@ -460,24 +503,14 @@ def make_playbook():
               "task": {"id": t1, "version": -1,
                        "name": "Sweep device locations",
                        "description": ("Run the agent script fleet-wide, collect "
-                                       "results, write them to the dataset."),
+                                       "results, write them to the dataset, then "
+                                       "close the job container."),
                        "scriptId": AUTOMATION, "type": "regular"},
-              "nexttasks": {"#none#": ["2"]},
               "scriptarguments": {
                   "script_name": {"simple": AGENT_SCRIPT_NAME},
                   "wait_seconds": {"simple": "120"}},
               "separatecontext": False, "view": view(450, 200),
               "reputationcalc": 0},
-        "2": {"id": "2", "taskid": t2, "type": "regular",
-              "task": {"id": t2, "version": -1,
-                       "name": "Close investigation",
-                       "description": ("Required. A scheduled job opens an "
-                                       "investigation container; without this the "
-                                       "job stays Running."),
-                       "scriptId": "Builtin|||closeInvestigation",
-                       "type": "regular", "brand": "Builtin"},
-              "separatecontext": False, "view": view(450, 370),
-              "scriptarguments": {}, "reputationcalc": 0},
     }
     payload = {
         "id": PLAYBOOK, "name": PLAYBOOK, "version": -1,
@@ -496,7 +529,20 @@ def make_playbook():
 
 
 def make_job():
-    """Create the time-triggered job. Delete and recreate rather than update.
+    """Create the time-triggered job. DOES NOT PRODUCE A WORKING JOB — see below.
+
+    MEASURED 2026-11-08, and the reason --all no longer calls this. A job
+    created through this route is inert: `jobs/run` answers 200, droppedCount
+    goes up, no container is created, the playbook never attaches, and
+    runStatus lands on `error` with nothing anywhere saying why. The
+    console-created job `Device location Sweep 2`, pointed at the same
+    playbook, runs correctly. Aligning every non-derived field that differed
+    between the two — `type`, `rawType`, `category`, `rawCategory` — changed
+    nothing, so the category note that used to be here is withdrawn and so is
+    its replacement.
+
+    Create the job in the console. Kept here because the schedule fields below
+    were expensive to work out and are right.
 
     THREE THINGS THE CONSOLE FORM AND THE DOCS DO NOT TELL YOU, all measured
     2026-11-08 after the console rejected a plain cron with
@@ -550,21 +596,11 @@ def make_job():
     }, surface="xsoar/public/v1")
     print("  job %s -> %s %s" % (JOB, status, (body or {}).get("id")))
 
-    # CLEAR `category`, which the API stamps as "job" on create and the console
-    # leaves empty. Measured 2026-11-08: it is the ONLY field differing between
-    # an API-created job and the one console-created job that runs on this
-    # tenant, and an API-created job fails Run now with "Item not found (8)".
-    # It cannot be set at create time, the server overwrites it, but a
-    # follow-up update does stick.
-    status, listing = api.call("jobs/search", {"page": 0, "size": 50},
-                               surface="xsoar/public/v1")
-    for j in (listing or {}).get("data") or []:
-        if j.get("name") == JOB and j.get("category"):
-            j["category"] = ""
-            j["rawCategory"] = ""
-            api.call("jobs", j, surface="xsoar/public/v1")
-            print("  cleared category on %s" % j["id"])
-
+    # A FAILED RUN LEAVES ITS CONTAINER OPEN, and the next run is then dropped
+    # with 400 "already running (10100)" rather than queued. On a job carrying
+    # shouldTriggerNew=false that means one bad night ends the schedule for
+    # good, silently. Measured 2026-11-08; it is set true above for that
+    # reason and should stay true even once the sweep is trusted.
     status, body = api.call("jobs/search", {"page": 0, "size": 50},
                             surface="xsoar/public/v1")
     for j in (body or {}).get("data") or []:
@@ -578,8 +614,10 @@ def main():
     p.add_argument("--list", action="store_true")
     p.add_argument("--automation", action="store_true")
     p.add_argument("--playbook", action="store_true")
-    p.add_argument("--job", action="store_true")
-    p.add_argument("--all", action="store_true")
+    p.add_argument("--job", action="store_true",
+                   help="create the job. INERT on this tenant; see make_job.")
+    p.add_argument("--all", action="store_true",
+                   help="list, automation and playbook. Not the job.")
     a = p.parse_args()
     if not any(vars(a).values()):
         p.print_help(); return
@@ -589,7 +627,8 @@ def main():
         print("automation:"); make_automation()
     if a.playbook or a.all:
         print("playbook:"); make_playbook()
-    if a.job or a.all:
+    # --all deliberately excludes the job: it creates one that cannot run.
+    if a.job:
         print("job:"); make_job()
 
 

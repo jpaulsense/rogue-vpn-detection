@@ -7,6 +7,37 @@ instead of one box at a time.
 Everything in the "Measured" sections below was executed against that tenant and the response
 recorded. Everything else is documentation, with its page named.
 
+## STATUS 2026-11-08, 15:12 PST: the scheduled sweep works end to end
+
+Measured on the run at 23:05Z, job `Device location Sweep 2`:
+
+```
+playbook_runs    playbook_status = completed        run_time 129.7s
+playbook_tasks   Sweep device locations = Completed
+beacons          start v6-close -> run_script endpoints=10 -> collect results=410 rows=9 -> closed
+dataset          9 hosts, exactly one row each
+```
+
+The job fires nightly at 01:00 Pacific. Three things are still console steps and each one has a
+measured reason below: uploading the agent script, creating the HTTP collector, and creating the
+job.
+
+**Three claims in the previous version of this section were wrong, and all three came from
+inference rather than a named surface.** They are corrected in place below; this list is here
+because the wrong versions were acted on for hours.
+
+| Claimed | Actually |
+|---|---|
+| The `DeviceLocationSweep` task does not execute at all | It executed every time. It was **failing**, in 7s, and `playbook_tasks` carried the exact error |
+| `scripts/insert` updates storage but not execution | It takes effect on the next run. The run that "proved" otherwise started **before** the insert |
+| The playbook's binding to the automation was broken | The binding was intact the whole time; `playbook/search` showed `scriptId: DeviceLocationSweep` throughout |
+
+**The real fault was a second job.** Two jobs on this tenant run the same playbook. The
+console-created `Device location Sweep 2` attaches its playbook and runs; the API-created
+`Device Location Sweep` does not, and `jobs/run` on it returns **200 having done nothing**. Every
+"the chain is broken" observation was made against the one that never ran, while the beacons being
+read came from the one that did.
+
 ## Files
 
 | File | What it is |
@@ -16,6 +47,8 @@ recorded. Everything else is documentation, with its page named.
 | `check_allowlist.py` | Checks imports against the tenant module allowlist. Run before any upload. |
 | `xsiam_api.py` | Tenant client. Handles both auth schemes, curl transport. |
 | `run_detection.py` | Runs the detection on endpoints as a snippet and prints parsed results. |
+| `deploy_playbook.py` | Deploys the XSOAR list, the automation and the playbook. Not the job. |
+| `xql.py` | Runs one XQL query and prints the rows. How the run datasets above are read. |
 
 ## Why this is a port and not a wrapper
 
@@ -264,51 +297,101 @@ Tenant licence shows `host_insights_expiration: 0`. The dataset answers anyway.
 ## The native scheduled sweep
 
 ```
-Job (time-triggered, console)
+Job "Device location Sweep 2"  (time-triggered, 01:00 Pacific, CONSOLE-CREATED)
   -> Playbook "Device Location Sweep"
-       task 1  DeviceLocationSweep    automation, does the whole sweep
-       task 2  closeInvestigation     builtin
+       task 1  DeviceLocationSweep    automation, does the whole sweep and closes the container
 ```
 
-Deployed by `deploy_playbook.py --all`. Three objects, all API-created:
+`deploy_playbook.py --list --automation --playbook` deploys the three objects below. **The job is
+the one piece the API cannot create here** — see the status section above.
 
 | Object | What it is |
 |---|---|
 | `DeviceLocationCollector` | XSOAR list holding the collector url and token, so neither the playbook nor the automation carries a secret |
-| `DeviceLocationSweep` | automation: finds the agent script by name, runs it on every connected endpoint, waits, collects results, gzip-POSTs them to the raw dataset |
-| `Device Location Sweep` | playbook: the automation, then `closeInvestigation` |
+| `DeviceLocationSweep` | automation: finds the agent script by name, runs it on every connected endpoint, waits, collects results, gzip-POSTs them to the raw dataset, closes the container |
+| `Device Location Sweep` | playbook: that one task |
+
+### Results arrive 41× per endpoint through the integration command
+
+`core-get-script-execution-results` returns **one entry per returned field per endpoint** when
+read through `demisto.executeCommand`, while the same action read straight from
+`scripts/get_script_execution_results` returns one entry per endpoint:
+
+```
+raw API, action 110          9 endpoints -> 9 entries
+integration command, beacon  results=369 rows=9   (9 x 41 fields)
+                             results=410 rows=9   (10 x 41 fields)
+```
+
+Taken at face value it writes 41 identical rows per host per scan, which no count, average or
+movement query over the dataset survives. The automation keys rows on `endpoint_id`, and the
+`collect` beacon reports `results=` and `rows=` on every run so the next change to this code
+cannot reintroduce it silently. The 369 duplicated rows from the 22:48Z run are still in the
+dataset; a raw dataset has no selective delete.
 
 **The automation does the whole sweep rather than the playbook orchestrating four
 tasks, deliberately.** Every context path between playbook tasks is a silent-failure surface
 here: a wrong path substitutes empty, the task reports Completed, and the run is green with no
 data in it. One task with one scalar output has almost none of that.
 
-### `closeInvestigation` resolved
+### `closeInvestigation` works, but only from inside the automation
 
-It is a **builtin, not an automation**, which is why an earlier probe read it as absent. Measured:
-it does not appear in any of the 537 automations on this tenant, and it is present in three
-shipping playbooks as:
+It is a **builtin, not an automation**, which is why an early probe read it as absent: it is in
+none of the 537 automations on this tenant and in three shipping playbooks as
 
 ```json
-{"scriptId": "Builtin|||closeInvestigation", "brand": "Builtin", "type": "regular"}
+{"scriptId": "Builtin|||closeInvestigation", "brand": "Builtin", "isCommand": true}
 ```
 
-That shape was copied from `Phishing - Core` rather than invented. It matters because a scheduled
-job opens an investigation container, and without this task the job stays **Running** forever.
-With the default queue handling that means the sweep runs **once** and then silently never again.
+**That shape, copied field-for-field from `Phishing - Core`, fails here.** Measured over three
+runs 2026-11-08: the task errors in 186–309 ms with an **empty `errors` array**, which reads as
+the builtin being unavailable rather than as a malformed task. Neither spelling of the one field
+our task was missing survives `playbook/save` — `isCommand` and `iscommand` both read back as
+`None`, so the flag cannot be set from the API at all.
 
-### STATUS 2026-11-08: the job chain is NOT working. Read this first.
+What works is calling the same builtin from inside the automation, which is step 7 of
+`AUTOMATION_CODE`:
 
-Everything up to and including the dataset and dashboard works. The job → playbook → automation
-chain does not. Current fault: **the `DeviceLocationSweep` task does not execute at all** (no
-beacons). It did execute earlier in the day; deleting and recreating the automation via
-`scripts/insert` broke the playbook's binding to it, and re-saving the playbook twice and saving
-the automation in the console did not restore it.
+```python
+demisto.executeCommand("closeInvestigation",
+                       {"closeReason": "Resolved", "closeNotes": "..."})
+```
 
-To restore: in the console, open the playbook, delete the `Sweep device locations` task, re-add it
-pointing at `DeviceLocationSweep`, save. Or delete the automation in the console and redeploy.
+Confirmed by the `closed` beacon and by `playbook_status: completed`. This is why the playbook has
+**one** task and not two. It matters because a scheduled job opens an investigation container, and
+a container that never closes blocks the next run with error 10100.
 
-**The last real error, which is already fixed in code but has never run:**
+### The API cannot create a working job on this tenant. Measured.
+
+| | `Device location Sweep 2` (console) | `Device Location Sweep` (API) |
+|---|---|---|
+| `jobs/run` | 200, container created, playbook attaches | 200, **nothing happens** |
+| `droppedCount` | 0 | 1 |
+| `currentIncidentId` | `job-<32 hex>` | empty |
+| `runStatus` after a run | `completed` | `error` |
+
+Aligning `type`/`rawType` to `##default##` and `category` to `job` — the only non-derived fields
+that differed — changed nothing: the run still dropped. **So `category` is not the difference, and
+neither is the incident type.** The earlier note claiming `category` explained it is withdrawn, and
+so is its replacement. What makes an API-created job inert is still unidentified.
+
+Consequence for deployment: `deploy_playbook.py --list --automation --playbook` is reproducible
+from code, **the job is not**. Create it in the console, pointed at the `Device Location Sweep`
+playbook. The dead API-created job is left on the tenant, disabled, as the evidence.
+
+**`jobs/run` refuses a second run while one is open:**
+
+```
+400 runNowJobErr  "Manual run for job Device location Sweep 2 failed as it is already
+                   running (10100)"
+```
+
+A failed run leaves its container open, so on a job with `shouldTriggerNew: false` **one failure
+stops the schedule permanently** — exactly the trap described under Scheduling below, and it is
+what the stalled container looked like. Both device-location jobs now carry
+`shouldTriggerNew: true` and `closePrevRun: true`.
+
+**The fixed error, for the record:**
 
 ```
 core-run-script errored: ... {"err_extra": "parameters_values must be of type: dict"}
@@ -324,31 +407,45 @@ the wrong thing: the problem is an absent argument, not a wrong type.
 `xsoar-8-api/cortex-xsoar-8.x-apis/jobs.md`. Note the order: operation then id. `jobs/{id}/run`
 returns 405 because it matches the `jobs/{id}` pattern, which reads as "no such route".
 
-### `scripts/insert` updates storage, not execution
+### `scripts/insert` DOES take effect on the next run
 
-Measured 2026-11-08: after inserting new automation code, `scripts/get` returns the new text while
-the engine keeps running the old. Proved by version-stamping a beacon; the stamp never appeared.
-Deleting and recreating breaks the playbook binding instead. **Assume an automation update needs a
-console save to take effect**, and verify with a version marker rather than by reading the code
-back.
+An earlier note here said it updated storage but not execution, on the evidence that a
+version-stamped beacon never appeared. **Withdrawn, measured 2026-11-08:** the run that was read
+had started *before* the insert. Every insert since has been picked up immediately —
+`v5-dedupe` and `v6-close` both appeared in the `start` beacon of the first run after deployment,
+seconds later, with no console save.
 
-### `category` is NOT the difference between console and API jobs
+Keep the version stamp anyway. It costs one line and it is what settled this.
 
-An earlier note here claimed it was. **Withdrawn.** A console-created job on this tenant also
-carries `category='job'`. The real difference between the API-created job that never attached its
-playbook and the console-created one that does is still unidentified.
+### Reading a job run: three datasets, and they are not empty
 
-### Reading a job run
+An earlier note here said there was no good path and that `playbook_runs` and `playbook_tasks`
+were empty. **Withdrawn.** They carry every run, including the failures that were being
+investigated blind, and the task row held the exact error text the whole time. The surface was
+never searched; it was published at
+[Monitor and troubleshoot playbook automations with XQL datasets](https://cortex-docs.paloaltonetworks.com/cortex-agentix/configure-cortex-agentix/automations/playbooks/monitor-and-troubleshoot-playbook-automations-with-xql-datasets.md).
 
-There is no good path. `runStatus` reports `completed` even when the playbook never attached.
-`investigationId` is empty on working and broken jobs alike. No case or issue is created that
-`incidents/search` can find, for any job including the working one. `playbook_runs` and
-`playbook_tasks` are empty. **`GET investigation/{id}/workplan` CREATES an empty investigation if
-one does not exist**, so querying it manufactures the evidence you then read — two rounds were lost
-to that.
+| Dataset | One row per | Read it for |
+|---|---|---|
+| `playbook_runs` | playbook run | `playbook_status`, `run_time`, the `job-<hex>` entity id |
+| `playbook_tasks` | task | `task_status` and **`errors`**, which is where a failing task's message lands |
+| `scripts_and_commands_metrics` | every script and command execution on the platform | whether an automation ran at all, `is_error`, `is_manual`, `duration` |
 
-What does work is instrumenting the automation to write a beacon row to the dataset at each stage.
-That is the only signal that escapes the container. `_beacon()` in the automation does this.
+```bash
+./xql.py 'dataset = playbook_tasks | filter task_playbook_id = "Device Location Sweep"
+          | fields _time, task_name, task_status, errors | sort desc _time' 2h
+```
+
+Two caveats that matter. The datasets **exclude Playground and debug runs**, so a console test
+leaves no row. And rows are written when the run *finishes*, so `task_status` is never `running`
+and a run in flight looks like no run at all — wait before concluding anything.
+
+The beacons stay useful for the inside of a long task, where nothing is written until it ends, and
+`_beacon()` costs one HTTP POST. They are instrumentation; the datasets are the record.
+
+**Do not query `GET investigation/{id}/workplan` to find out whether a container exists.** It
+CREATES an empty investigation if one does not, so it manufactures the evidence you then read.
+`incidents/search` finds no job container on this tenant, for working and broken jobs alike.
 
 ### Playbook write traps
 
@@ -366,12 +463,14 @@ Always read back and check `startTaskId` and `nextTasks` are populated, using th
 No scheduler in Action Center. Use **Automations → Jobs → time-triggered job** running a playbook.
 
 **The job documentation requires the playbook to end with `closeInvestigation`**, or the container
-stays open and the job sticks in Running. But a measured note from this tenant on 2026-09-25 says a
-task calling `|||closeInvestigation` errors and stops the parent playbook. It is a builtin in
-`CommonServer.js`, not a standalone automation, so that probe may have been in the wrong namespace.
+stays open and the job sticks in Running. The 2026-09-25 note on this tenant saying a task calling
+`|||closeInvestigation` errors was **right**, and it is still right as of 2026-11-08; the close is
+done from inside the automation instead.
 
-Test it before trusting a schedule. With queue handling set to "Don't trigger a new job run", a
-stuck container means the sweep runs **once** and then silently never again.
+Set **`shouldTriggerNew: true`** on any job built on this pattern. With "Don't trigger a new job
+run", a single failed run leaves its container open and the sweep runs **once** and then silently
+never again — `jobs/run` answers 400 `already running (10100)` and the scheduler just drops it.
+That is not a hypothetical: it is what the stalled job looked like for most of 2026-11-08.
 
 ## Getting results into XQL: five write paths, and the one that wins
 
@@ -538,7 +637,11 @@ fault. Cloud VMs will always look like this; do not read it as a detection failu
 
 1. Is `boolean` accepted for a manifest input parameter, or must the flags be strings?
    `_parse_bool` already handles `"true"`/`"false"`, so only the manifest would change.
-2. Does `closeInvestigation` work here, as a builtin rather than an automation?
+2. **What makes an API-created job inert.** `type`, `rawType`, `category` and `rawCategory` are
+   ruled out. Until this is answered the job is a console step and the deployment is not
+   reproducible from code end to end.
 3. Maximum payload length through `commands_list`, if the PowerShell route is ever needed.
 4. Whether `system_profiler` still returns a BSSID on a laptop associated to a single AP, as
    opposed to the Studio's two.
+5. Why `core-get-script-execution-results` fans each endpoint out to 41 entries through the
+   integration command but not through the raw API. The dedupe makes it harmless, not understood.

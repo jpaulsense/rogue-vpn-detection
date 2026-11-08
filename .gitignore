@@ -32,3 +32,10 @@ wifi-debug.*
 *.zip
 WiFiScanner.app/
 .DS_Store
+
+# Python bytecode
+__pycache__/
+*.pyc
+
+# XSIAM agent script manifests are source, not output
+!xsiam/*.json

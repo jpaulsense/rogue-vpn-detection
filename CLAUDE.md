@@ -18,6 +18,22 @@ Users may use consumer VPNs (NordVPN, ExpressVPN, etc.) to route their traffic t
 - `wifi-geolocation.py` - Cross-platform Python script (macOS/Linux/Windows)
 - `wifi-geolocation-windows.ps1` - Windows PowerShell script with additional VPN detection
 - `wifi-geolocation.sh` - Original bash script (deprecated, use Python version)
+- `xsiam/` - **The fleet lane.** Runs the detection from Cortex XSIAM on endpoints carrying the
+  XDR agent. Read `xsiam/README.md` before touching it.
+
+## Running it at fleet scale from Cortex XSIAM (lab / PoC, added 2026-11-05)
+
+**Everything about this lane lives in `xsiam/README.md`** - why the `.ps1` cannot be uploaded,
+the module allowlist, the upload and run steps, the API scope limits, scheduling, and the route
+into a custom dataset for correlation. Three things worth knowing before you open it:
+
+- Agent scripts are **Python 3.7** with a tenant-specific module allowlist, not PowerShell, so
+  `xsiam/vpn_location_detect.py` is a port rather than a wrapper.
+- The allowlist is visible only in the console (Action Center -> Agent Script Library -> New
+  Script -> supported modules) and is published nowhere. It is transcribed into
+  `xsiam/check_allowlist.py`; **run that before every upload.**
+- `wifi-geolocation.py` in this directory imports `typing` and `urllib`, neither of which is on
+  the allowlist, which is the concrete reason it cannot be uploaded unchanged.
 
 ## API Configuration
 

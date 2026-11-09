@@ -31,6 +31,12 @@ HISTORY = "agentscript_devicelocation_raw"
 LEGACY_HISTORY_LOOKUP = "vpn_location_history"
 CURRENT = "vpn_location_current"
 
+# The automation writes a __BEACON__ row at each stage of a sweep so a failing
+# run says where it stopped. Those rows are in the same dataset as the scans
+# and carry a host_name, so `filter host_name != null` does NOT exclude them:
+# every by-device widget listed __BEACON__ as an eleventh device all weekend.
+BEACON = "__BEACON__"
+
 # datetime so XQL gets a real time axis; everything else text or number.
 SCHEMA = {
     "scanned_at": "datetime", "host_name": "text", "agent_id": "text",
@@ -49,13 +55,32 @@ SCHEMA = {
 
 # widget_key MUST start with "xql_" or insert returns
 # 200 with errors[].error "widget_key must start with xql_".
+# EVERY WIDGET READS THE RAW DATASET. Two of them read the CURRENT lookup
+# until 2026-11-09 and showed Saturday's data all weekend, because the lookup
+# is written by run_detection.py --push from this laptop and the nightly job
+# does not write it at all. Nothing announced that: the widgets rendered,
+# with real rows, 38 hours old. One dataset with one writer cannot go stale
+# that way, and `dedup host_name by desc _time` gives the same latest-per-
+# device result the lookup existed to serve.
+#
+# The lookup is NOT retired -- it is still the right shape for joining device
+# state onto another query. It is just not a dashboard source.
+REAL_ROWS = ("| filter host_name != null and host_name != \"" + BEACON + "\"\n")
+
+# `scans` counts DISTINCT scanned_at, not rows. On 2026-11-08 one run wrote 41
+# identical rows per host (see README, results fan-out), and count() reported
+# 46 scans for a device that had been scanned six times. Those rows are still
+# in the dataset and a raw dataset has no selective delete, so the query has
+# to be the thing that is robust to them.
 WIDGETS = [
     {
         "key": "xql_vpnloc_current_state",
         "title": "Device location · current state",
         "description": "Latest scan per device. Egress point, reachability and sanctioned VPN.",
         "query": (
-            "dataset = " + CURRENT + "\n"
+            "dataset = " + HISTORY + "\n"
+            + REAL_ROWS +
+            "| dedup host_name by desc _time\n"
             "| fields host_name, scanned_at, first_public_hop, anycast_reachable,\n"
             "         tailscale_derp, wifi_method, timezone_key, sanctioned_vpn, confidence\n"
             "| sort asc host_name"
@@ -68,8 +93,9 @@ WIDGETS = [
         "description": "A device seen behind more than one egress point has moved networks.",
         "query": (
             "dataset = " + HISTORY + "\n"
-            "| filter host_name != null\n"
-            "| comp count() as scans, count_distinct(first_public_hop) as networks,\n"
+            + REAL_ROWS +
+            "| comp count_distinct(scanned_at) as scans,\n"
+            "       count_distinct(first_public_hop) as networks,\n"
             "       values(first_public_hop) as egress_points,\n"
             "       min(scanned_at) as first_seen, max(scanned_at) as last_seen by host_name\n"
             "| alter moved = if(networks > 1, \"MOVED\", \"stationary\")\n"
@@ -83,6 +109,7 @@ WIDGETS = [
         "description": "Where the fleet leaves the internet from. One tall bar is the office.",
         "query": (
             "dataset = " + HISTORY + "\n"
+            + REAL_ROWS +
             "| filter first_public_hop != null\n"
             "| comp count_distinct(host_name) as devices by first_public_hop\n"
             "| sort desc devices\n"
@@ -101,7 +128,9 @@ WIDGETS = [
             "outbound 53 to force their own resolver, so this is a not-your-network tell."
         ),
         "query": (
-            "dataset = " + CURRENT + "\n"
+            "dataset = " + HISTORY + "\n"
+            + REAL_ROWS +
+            "| dedup host_name by desc _time\n"
             "| filter anycast_reachable = 0\n"
             "| fields host_name, scanned_at, first_public_hop, dns_servers, anchor_rtts\n"
             "| sort asc host_name"
@@ -114,8 +143,9 @@ WIDGETS = [
         "description": "A device that stopped reporting is not the same as a device that is clean.",
         "query": (
             "dataset = " + HISTORY + "\n"
-            "| filter host_name != null\n"
-            "| comp count() as scans, max(scanned_at) as last_scan by host_name\n"
+            + REAL_ROWS +
+            "| comp count_distinct(scanned_at) as scans,\n"
+            "       max(scanned_at) as last_scan by host_name\n"
             "| sort asc last_scan"
         ),
         "view": None,

@@ -7,9 +7,21 @@ instead of one box at a time.
 Everything in the "Measured" sections below was executed against that tenant and the response
 recorded. Everything else is documentation, with its page named.
 
-## STATUS 2026-11-08, 15:12 PST: the scheduled sweep works end to end
+## STATUS 2026-11-09: the sweep runs on its own schedule, and the dashboard reads it
 
-Measured on the run at 23:05Z, job `Device location Sweep 2`:
+The first unattended run fired at 01:00 Pacific on 2026-11-09 and completed in 42s, nine hosts,
+one row each, no one watching. `playbook_status = completed`.
+
+The dashboard was wrong until 09:30 that morning in two ways that both rendered as real rows
+rather than as an error, which is why a weekend passed without either being noticed:
+
+| Symptom | Cause |
+|---|---|
+| Current state and restricted-network panels showed **Saturday's data** | Both read the `vpn_location_current` lookup, which only `run_detection.py --push` writes. The nightly job writes the raw dataset and nothing else, so the lookup stopped moving the moment the job took over |
+| An eleventh device named **`__BEACON__`**, with 46 scans | `filter host_name != null` does not exclude beacon rows. They carry a host_name |
+
+Both are fixed by every widget reading `agentscript_devicelocation_raw` and nothing else — see
+The dashboard, below. Earlier run, for the record, 2026-11-08 23:05Z:
 
 ```
 playbook_runs    playbook_status = completed        run_time 129.7s
@@ -264,9 +276,21 @@ as root does not bypass it. The legacy `airport -s` scanner was removed in macOS
 tries `wdutil info`, then `system_profiler SPAirPortDataType`, then `airport`, and reports which
 one answered in `wifi_method`.
 
-**Measured on the Mac Studio: `system_profiler` returned 2 BSSIDs**, which is better than expected
-and is the minimum Google wants for a WiFi fix. Do not assume that holds on a laptop associated to
-a single AP.
+**macOS returns no BSSID through the agent, and that is settled.** An early snippet run on
+2026-11-05 recorded `system_profiler` returning 2 BSSIDs, and this section said so until
+2026-11-09; the later measurement through the uploaded agent script contradicts it and is the one
+that counts. Every macOS row since has reported `wifi_method: none`, `bssid_count: 0` and the
+error
+
+```
+macos: wdutil returned BSSID <redacted>; Location Services gates it per-process
+and root does not bypass it
+```
+
+The fall-through is not the problem — `system_profiler SPAirPortDataType` carries no BSSID field
+in any form, and `airport` is gone. **Treat macOS as a nine-layer detection**, as
+`_wlan_scan_macos` has said since 2026-11-06. Windows is where the BSSID layer works: Stormbreaker
+returns 1 to 7 BSSIDs per run through `wlanapi`, under SYSTEM, with nobody logged in.
 
 Where only the associated BSSID comes back, the value is not a coordinate, it is a stable
 identifier for where the machine is sitting. Comparing today's BSSID against the ones a device has
@@ -604,9 +628,31 @@ measured lesson behind the same rule in the playbook notes.
 ./build_dashboard.py --dashboard    # "Device Location · VPN spoofing"
 ```
 
-Live on the tenant as of 2026-11-06: five widgets, one dashboard, both datasets. The movement
-widget identified the MacBook Air as `MOVED` across two egress points from real scan history while
-the three stationary machines stayed at one.
+Live on the tenant: five widgets, one dashboard. The movement widget identifies the MacBook Air as
+`MOVED` across two egress points from real scan history while the stationary machines stay at one.
+
+### Every widget reads the raw dataset. Three rules, each from a defect.
+
+**1. No widget may read a lookup.** `vpn_location_current` is written by `run_detection.py --push`
+from a laptop; the nightly job writes only the raw dataset. From the moment the job took over, two
+panels showed a frozen Saturday and went on rendering perfectly. One dataset with one writer
+cannot fail that way. `dedup host_name by desc _time` returns the same latest-row-per-device the
+lookup existed to serve, and it respects the dashboard's time picker, which a lookup cannot.
+
+The lookup is not retired. It is the right shape for joining device state onto another query. It
+is simply not a dashboard source.
+
+**2. Exclude `__BEACON__` by name.** `filter host_name != null` does not do it: beacon rows carry
+a host_name. Left in, the fleet gains an eleventh device with no egress point and a scan count
+higher than any real machine's.
+
+**3. Count `count_distinct(scanned_at)`, never `count()`.** The 2026-11-08 fan-out put 41
+identical rows per host in the dataset, and `count()` reported 46 scans for a device scanned six
+times. A raw dataset has no selective delete, so those rows are permanent and the query has to be
+what is robust to them.
+
+A widget that is wrong in any of these three ways still renders, still returns rows, and still
+looks right. None of them produce an error anywhere.
 
 ```bash
 ./run_detection.py --all-workstations      # runs, then writes both datasets
@@ -620,8 +666,8 @@ Action 98 and 99, 2026-11-05, run as snippets.
 
 | Endpoint | Platform | `wifi_method` | BSSIDs | Notes |
 |---|---|---|---|---|
-| Jared's Mac Studio | macOS | `system_profiler` | 2 | 9.3s. Tailscale found and classed sanctioned. |
-| Stormbreaker | Windows workstation | **`wlanapi`** | 2 | 5.4s. Timezone `Pacific Standard Time`. |
+| Jared's Mac Studio | macOS | `system_profiler` | 2 | 9.3s. Tailscale found and classed sanctioned. **Did not reproduce** — see the macOS section |
+| Stormbreaker | Windows workstation | **`wlanapi`** | 2 | 5.4s. Timezone `Pacific Standard Time`. Still answering daily |
 | windows-test | Windows Server, GCP | `none` | 0 | 17.9s. `wlanapi load: wlanapi`, degraded cleanly. |
 | Jared's MacBook Air | macOS | pending | | Agent had not polled; action waits up to four days. |
 

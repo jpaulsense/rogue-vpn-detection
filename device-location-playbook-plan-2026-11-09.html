@@ -1,0 +1,701 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>The analyst playbook needs a baseline, not more collection</title>
+<style>
+  :root {
+    --ivory:#FAF9F5; --slate:#141413; --clay:#D97757; --clay-d:#B85C3E;
+    --oat:#E3DACC; --olive:#788C5D; --rust:#B04A3F; --sky:#5B8FA8;
+    --gray-100:#F0EEE6; --gray-200:#E6E3DA; --gray-300:#D1CFC5;
+    --gray-500:#87867F; --gray-700:#3D3D3A; --white:#FFFFFF;
+    --serif: ui-serif, Georgia, 'Times New Roman', serif;
+    --sans: system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
+    --mono: ui-monospace, 'SF Mono', Menlo, Monaco, monospace;
+    /* aliases used by the comment layer */
+    --bg:var(--ivory); --panel:var(--white); --line:var(--gray-300);
+    --ink:var(--slate); --muted:var(--gray-500); --accent:var(--clay);
+    --high:var(--rust); --good:var(--olive);
+  }
+  * { box-sizing:border-box; }
+  body { margin:0; background:var(--bg); color:var(--ink);
+         font:16px/1.65 var(--sans); -webkit-font-smoothing:antialiased; }
+  .wrap { display:grid; grid-template-columns:260px minmax(0,1fr); gap:3rem;
+          max-width:1280px; margin:0 auto; padding:2.5rem 1.5rem 7rem; }
+  nav.toc { position:sticky; top:2rem; align-self:start; max-height:calc(100vh - 4rem);
+            overflow-y:auto; font-size:.86rem; }
+  nav.toc .lbl { text-transform:uppercase; letter-spacing:.08em; font-size:.68rem;
+                 font-weight:700; color:var(--muted); margin:0 0 .7rem; }
+  nav.toc a { display:block; padding:.3rem .6rem; color:var(--gray-700);
+              text-decoration:none; border-left:2px solid var(--gray-200); line-height:1.4; }
+  nav.toc a:hover { color:var(--clay-d); border-left-color:var(--clay); background:var(--gray-100); }
+  header.doc { border-bottom:3px solid var(--slate); padding-bottom:1.4rem; margin-bottom:2.2rem; }
+  header.doc .kicker { text-transform:uppercase; letter-spacing:.1em; font-size:.7rem;
+                       font-weight:700; color:var(--clay-d); margin:0 0 .5rem; }
+  h1 { font:600 2.15rem/1.18 var(--serif); margin:0 0 .6rem; letter-spacing:-.015em; }
+  header.doc .sub { font:1.05rem/1.6 var(--serif); color:var(--gray-700); margin:0; max-width:70ch; }
+  header.doc .meta { margin-top:1rem; font-size:.78rem; color:var(--muted); font-family:var(--mono); }
+  section { margin:0 0 3rem; scroll-margin-top:1.5rem; }
+  h2 { font:600 1.42rem/1.3 var(--serif); margin:0 0 .4rem; letter-spacing:-.01em;
+       padding-bottom:.4rem; border-bottom:1px solid var(--gray-200); }
+  h3 { font:600 1.06rem/1.35 var(--sans); margin:1.8rem 0 .5rem; }
+  h4 { font:700 .8rem/1.3 var(--sans); text-transform:uppercase; letter-spacing:.06em;
+       color:var(--muted); margin:1.3rem 0 .4rem; }
+  p, li { max-width:78ch; }
+  p { margin:.7rem 0; }
+  ul, ol { padding-left:1.2rem; }
+  li { margin:.35rem 0; }
+  code { font-family:var(--mono); font-size:.86em; background:var(--gray-100);
+         padding:.1em .34em; border-radius:3px; }
+  pre { background:var(--slate); color:#E8E6DF; padding:1rem 1.1rem; border-radius:8px;
+        overflow-x:auto; font:.82rem/1.6 var(--mono); max-width:84ch; }
+  pre code { background:none; padding:0; color:inherit; font-size:1em; }
+  .tablewrap { overflow-x:auto; margin:1rem 0; max-width:92ch; }
+  table { border-collapse:collapse; width:100%; font-size:.88rem; background:var(--white); }
+  th { text-align:left; font-weight:700; font-size:.72rem; text-transform:uppercase;
+       letter-spacing:.05em; color:var(--muted); border-bottom:2px solid var(--gray-300);
+       padding:.55rem .7rem; vertical-align:bottom; }
+  td { border-bottom:1px solid var(--gray-200); padding:.55rem .7rem; vertical-align:top; }
+  tr:last-child td { border-bottom:none; }
+  td.n { font-family:var(--mono); font-size:.84em; white-space:nowrap; }
+  .lede { font:1.12rem/1.65 var(--serif); background:var(--gray-100);
+          border-left:4px solid var(--clay); padding:1.1rem 1.3rem; border-radius:0 8px 8px 0;
+          margin:0 0 1.4rem; max-width:80ch; }
+  .lede p { margin:.5rem 0; max-width:none; }
+  .lede p:first-child { margin-top:0; } .lede p:last-child { margin-bottom:0; }
+  .note { border-left:3px solid var(--sky); background:var(--white); padding:.8rem 1rem;
+          margin:1rem 0; border-radius:0 6px 6px 0; max-width:80ch; font-size:.93rem; }
+  .warn { border-left:3px solid var(--rust); background:var(--white); padding:.8rem 1rem;
+          margin:1rem 0; border-radius:0 6px 6px 0; max-width:80ch; font-size:.93rem; }
+  .tag { display:inline-block; font:700 .64rem/1.5 var(--sans); text-transform:uppercase;
+         letter-spacing:.06em; padding:.08rem .45rem; border-radius:3px; vertical-align:.1em; }
+  .t-m { background:#E4EBE0; color:#46603A; }
+  .t-s { background:#DEE8EE; color:#2F5567; }
+  .t-a { background:var(--oat); color:#6C5B45; }
+  details { border:1px solid var(--gray-200); border-radius:8px; background:var(--white);
+            padding:.6rem .9rem; margin:1rem 0; max-width:92ch; }
+  details[open] { padding-bottom:1rem; }
+  summary { cursor:pointer; font-weight:600; font-size:.92rem; }
+  summary:hover { color:var(--clay-d); }
+  figure { margin:1.4rem 0; max-width:92ch; }
+  figcaption { font-size:.76rem; color:var(--muted); margin-top:.5rem; font-family:var(--mono); }
+  .cmt { margin:1.4rem 0 .4rem; background:var(--panel); border:1px dashed var(--line);
+    border-left:3px solid var(--accent); border-radius:8px; padding:.55rem .8rem .7rem; max-width:78ch; }
+  .cmt-h { display:flex; align-items:center; gap:.5rem; font-size:.78rem; font-weight:700;
+    text-transform:uppercase; letter-spacing:.05em; color:var(--muted); margin-bottom:.35rem; }
+  .cmt-state { font-weight:600; text-transform:none; letter-spacing:0; }
+  .cmt-state.is-draft { color:var(--high); }
+  .cmt-state.is-saved { color:var(--good); }
+  .cmt textarea { width:100%; min-height:44px; resize:vertical; border:1px solid var(--line);
+    border-radius:6px; background:var(--bg); color:var(--ink); padding:.45rem .6rem;
+    font:.9rem/1.5 var(--sans); }
+  .cmt textarea:focus-visible { outline:2px solid var(--accent); outline-offset:1px; }
+  #cmtbar { position:fixed; left:1rem; right:1rem; bottom:1rem; z-index:50; display:flex;
+    align-items:center; gap:.7rem; justify-content:space-between; background:var(--panel);
+    border:1px solid var(--line); border-radius:99px; padding:.45rem .6rem .45rem 1rem;
+    box-shadow:0 4px 18px rgba(0,0,0,.18); font-size:.85rem; max-width:min(92vw,560px);
+    margin:0 auto; }
+  #cmtbar button { border:none; border-radius:99px; background:var(--accent); color:#fff;
+    font:600 .85rem/1 var(--sans); padding:.55rem 1rem; cursor:pointer; }
+  #cmtbar button[disabled] { opacity:.6; cursor:default; }
+  #cmtcount { color:var(--muted); font-variant-numeric:tabular-nums; white-space:nowrap; }
+  #cmtstatus { color:var(--muted); font-size:.78rem; line-height:1.3; }
+  @media (max-width:900px) { .wrap { grid-template-columns:1fr; gap:1.5rem; }
+    nav.toc { position:static; max-height:none; } }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<nav class="toc">
+  <p class="lbl">Contents</p>
+  <a href="#answer">The answer</a>
+  <a href="#exists">What already runs</a>
+  <a href="#tenets">What this optimizes for</a>
+  <a href="#baseline">Normal is per device</a>
+  <a href="#deviation">The deviation test</a>
+  <a href="#case">What the analyst opens</a>
+  <a href="#widgets">What the dashboard shows</a>
+  <a href="#map">The map</a>
+  <a href="#risks">Three reasons this fails</a>
+  <a href="#sequence">Sequence</a>
+  <a href="#open">Verify before building</a>
+  <a href="#appendix">Appendix: measured state</a>
+</nav>
+
+<main>
+
+<header class="doc">
+  <p class="kicker">Cortex XSIAM · jpse-ca-gov · design doc</p>
+  <h1>The analyst playbook needs a baseline, not more collection</h1>
+  <p class="sub">Eleven layers of evidence per device already land in XSIAM every night. None of
+  them answer an analyst's question, because no layer knows what that device normally looks
+  like.</p>
+  <p class="meta">Device location / VPN spoofing · 2026-11-09 · <span class="tag t-m">measured</span>
+  <span class="tag t-s">sourced</span> <span class="tag t-a">assumed</span> mark every claim below</p>
+</header>
+
+<section id="answer">
+<h2>The answer</h2>
+
+<div class="lede">
+  <p>Build one thing: a per-device baseline, held in a lookup, written by the sweep that already
+  runs. Every other ask follows from it. The verdict an analyst reads, the case that gets opened,
+  the confidence score and the map all come from comparing tonight's scan to what that device has
+  always looked like.</p>
+  <p>No new collection. No machine learning. The comparison is a set membership test on four axes
+  and about forty lines in an automation that is already deployed.</p>
+</div>
+
+<p>The detection today emits 41 observables per device per night. An analyst handed
+<code>first_public_hop = 192.77.111.1</code> and <code>dns_servers = 100.100.100.100|172.20.0.1</code>
+has no way to judge them. The same two values next to <em>never seen before on this device, which
+has reported 207.173.132.1 on 47 of 47 scans across 31 days</em> is a finding anyone can action.</p>
+
+<p>The scale case makes this sharper rather than softer. In an estate with many egress points, no
+global list of good IP addresses can exist, and a central allow-list becomes a maintenance
+project that is always behind. A device compared against itself needs no such list, and the
+per-device test is the same test whether the fleet has ten machines or ten thousand.</p>
+
+<h3>What gets built</h3>
+<div class="tablewrap"><table>
+<thead><tr><th>Piece</th><th>Where it lives</th><th>Effort</th></tr></thead>
+<tbody>
+<tr><td>Baseline per device</td><td>lookup <code>vpn_location_baseline</code>, keyed on <code>host_name</code></td><td class="n">new, small</td></tr>
+<tr><td>Deviation test and narrative</td><td>inside <code>DeviceLocationSweep</code>, after the collect step</td><td class="n">~40 lines</td></tr>
+<tr><td>Finding rows</td><td>a second HTTP collector dataset</td><td class="n">console step</td></tr>
+<tr><td>Case creation</td><td>one correlation rule over that dataset</td><td class="n">one payload</td></tr>
+<tr><td>Analyst dashboard</td><td>4 new widgets; the existing 5 become the evidence layer</td><td class="n"><code>build_dashboard.py</code></td></tr>
+</tbody></table></div>
+</section>
+
+<section id="exists">
+<h2>What already runs, and does not need building</h2>
+
+<p>Leading with this because it is most of the system. <span class="tag t-m">measured</span> on
+jpse-ca-gov, 2026-11-09.</p>
+
+<div class="tablewrap"><table>
+<thead><tr><th>Component</th><th>State</th></tr></thead>
+<tbody>
+<tr><td>Agent script on endpoints</td><td>10 devices reporting, Windows, macOS and Linux, 41 fields per scan</td></tr>
+<tr><td><code>agentscript_devicelocation_raw</code></td><td>Append-only, native <code>_time</code>, retention applies. One row per device per scan</td></tr>
+<tr><td>Nightly collection</td><td>Job at 01:00 Pacific, 42 s, unattended. Closes its own container</td></tr>
+<tr><td>Dashboard</td><td>Five widgets, all reading the raw dataset</td></tr>
+<tr><td>Scan history</td><td>Six to nine scans per device, 31 days of span on the oldest</td></tr>
+</tbody></table></div>
+
+<p>The collection layer is finished. Everything in this plan sits downstream of the row that
+already lands in that dataset every night.</p>
+</section>
+
+<section id="tenets">
+<h2>What this optimizes for when goals conflict</h2>
+
+<ol>
+<li><strong>A device is compared to itself, never to the fleet.</strong> Hotel wifi in Sacramento
+is slower than fibre in Austin, and a regional office is not an anomaly. Every threshold that is
+global is wrong at the second site.</li>
+<li><strong>Silence until the baseline is earned.</strong> A device with four days of history
+produces no finding at any confidence. A detection that fires on every new laptop is turned off
+within a week.</li>
+<li><strong>The case carries the reasoning, not the fields.</strong> If an analyst has to
+reconstruct why something was elevated, the detection has pushed its work onto them.</li>
+<li><strong>Prefer a signal that cannot be spoofed over one that is convenient.</strong> Ranked:
+RF environment, then clock, then reachability, then egress address. Egress is the weakest and the
+easiest to read, which is why it is where everyone stops.</li>
+<li><strong>No enrichment call from an endpoint.</strong> A key that ships to an endpoint is a
+published key. Geolocation happens server side or not at all.</li>
+</ol>
+</section>
+
+<section id="baseline">
+<h2>Normal is per device, and it belongs in a lookup</h2>
+
+<p>For each device, over a trailing 30 days, the baseline holds the set of values observed on each
+axis with how often each was seen, plus how much history backs it.</p>
+
+<div class="tablewrap"><table>
+<thead><tr><th>Axis</th><th>Fields</th><th>Spoofable by a VPN</th><th>Available on</th></tr></thead>
+<tbody>
+<tr><td>RF environment</td><td><code>bssids</code>, <code>bssid_count</code></td><td>No. The radio sees what is physically there</td><td class="n">Windows only</td></tr>
+<tr><td>Clock</td><td><code>timezone_key</code>, <code>utc_offset_hours</code></td><td>No, unless the user sets it deliberately</td><td class="n">all</td></tr>
+<tr><td>Reachability</td><td><code>anycast_reachable</code>, <code>dns_servers</code></td><td>Partly</td><td class="n">all</td></tr>
+<tr><td>Egress</td><td><code>first_public_hop</code>, <code>ip_asn</code></td><td>Yes, that is what a VPN does</td><td class="n">all</td></tr>
+</tbody></table></div>
+
+<div class="warn">
+<strong>The strongest axis is dark on macOS.</strong> <span class="tag t-m">measured</span> Every
+macOS row since 2026-11-06 reports <code>wifi_method: none</code> and <code>bssid_count: 0</code>:
+Apple gates BSSID on Location Services authorization for the calling process and root does not
+satisfy it. A Mac is therefore a three-axis detection and a Windows machine is a four-axis one.
+Stormbreaker returns 1 to 7 BSSIDs per run under SYSTEM with nobody logged in.
+</div>
+
+<h3>Why a lookup is right here, having been wrong before</h3>
+
+<p>A lookup has no <code>_time</code> and ignores the query timeframe, which is what made it the
+wrong home for scan history and produced a dashboard showing a frozen Saturday. The baseline is
+the opposite shape: one small mutable row per device, read by joining, never plotted over time.
+That is a reference table, which is what a lookup is.</p>
+
+<pre><code>vpn_location_baseline        key_fields: ["host_name"]
+
+host_name            Jared's MacBook Air
+egress_values        207.173.132.1:47
+asn_values           AS7922:47
+bssid_set            9 values
+timezone_values      America/Los_Angeles:47
+anycast_typical      3
+scan_days            31
+scan_count           47
+first_seen           2026-10-09
+baseline_updated     2026-11-09T09:05:00Z</code></pre>
+
+<h3>Who writes it</h3>
+
+<p>The sweep automation, at the end of its run, from one XQL query over the raw dataset. The
+tenant already carries an <strong>XQL Query Engine</strong> integration instance, so the automation
+can run XQL through <code>xdr-xql-generic-query</code> without a second credential
+<span class="tag t-m">measured</span>. The baseline is recomputed nightly rather than incremented,
+which costs one query and removes a whole class of drift bug.</p>
+
+<div class="note">
+A device that has genuinely relocated, a person who moved house, will pull its own baseline across
+within the window. That is correct behaviour, and it is also the weakness: a slow move is
+invisible by construction. Section <a href="#risks">Three reasons this fails</a> takes this up.
+</div>
+</section>
+
+<section id="deviation">
+<h2>The deviation test, and the gate in front of it</h2>
+
+<p>For the newest scan on each device, each axis is a set membership test against that device's
+own baseline. There is no model, no training and no threshold tuning.</p>
+
+<pre><code>egress_new       = first_public_hop not in baseline.egress_values
+asn_new          = ip_asn            not in baseline.asn_values
+rf_disjoint      = bssid_set and baseline.bssid_set and no overlap
+clock_changed    = timezone_key      not in baseline.timezone_values
+reach_dropped    = anycast_reachable == 0 and baseline.anycast_typical > 0</code></pre>
+
+<p>Confidence is how many independent axes moved, which is a count rather than a weighting. Two
+axes moving together is far harder to produce accidentally than either alone.</p>
+
+<div class="tablewrap"><table>
+<thead><tr><th>Axes moved</th><th>Baseline mature</th><th>Baseline immature</th></tr></thead>
+<tbody>
+<tr><td class="n">0</td><td>no finding</td><td>no finding</td></tr>
+<tr><td class="n">1</td><td>LOW, recorded, no case</td><td>suppressed</td></tr>
+<tr><td class="n">2</td><td>MEDIUM, case</td><td>suppressed</td></tr>
+<tr><td class="n">3 or more</td><td>HIGH, case, priority</td><td>suppressed</td></tr>
+</tbody></table></div>
+
+<p>Mature means <strong>14 days and 10 scans</strong> <span class="tag t-a">assumed</span>, a
+starting value to be moved once a month of real data exists. Until a device qualifies it appears
+on the dashboard as <em>building baseline</em> with its day count, which is a state an analyst can
+see rather than an absence they cannot.</p>
+
+<h3>The test case, which is already in the data</h3>
+
+<p>The MacBook Air has been seen behind two egress points, <code>192.77.111.1</code> and
+<code>207.173.132.1</code>, while every other device stayed at one
+<span class="tag t-m">measured</span>. Taking it out of the house and back is a repeatable
+end-to-end test of the whole chain, on a device whose baseline is the most established in the
+fleet.</p>
+</section>
+
+<section id="case">
+<h2>What the analyst opens</h2>
+
+<p>There is no create-a-case API on Cortex and none is needed: a correlation rule over a custom
+dataset produces the issue, and <code>alert_fields</code> is what makes it readable
+<span class="tag t-s">sourced, xsiam-xql-correlation skill, verified on tenant</span>. A
+correlation rule may source any custom dataset and may not source <code>issues</code> or
+<code>alerts</code>, which decides the shape below.</p>
+
+<figure>
+<svg viewBox="0 0 880 150" width="100%" role="img" aria-label="Flow from endpoint scan to analyst case">
+  <defs><marker id="a" markerWidth="9" markerHeight="7" refX="8" refY="3.5" orient="auto">
+    <polygon points="0 0, 9 3.5, 0 7" fill="#87867F"/></marker></defs>
+  <g font-family="system-ui, sans-serif" font-size="11.5" fill="#141413">
+    <rect x="2"  y="42" width="118" height="46" rx="7" fill="#FFFFFF" stroke="#D1CFC5"/>
+    <text x="61"  y="62" text-anchor="middle">agent script</text>
+    <text x="61"  y="77" text-anchor="middle" fill="#87867F">10 endpoints</text>
+
+    <rect x="160" y="42" width="140" height="46" rx="7" fill="#FFFFFF" stroke="#D1CFC5"/>
+    <text x="230" y="62" text-anchor="middle">…_raw</text>
+    <text x="230" y="77" text-anchor="middle" fill="#87867F">history, append only</text>
+
+    <rect x="340" y="4"  width="140" height="46" rx="7" fill="#F0EEE6" stroke="#D1CFC5"/>
+    <text x="410" y="24" text-anchor="middle">…_baseline</text>
+    <text x="410" y="39" text-anchor="middle" fill="#87867F">lookup, 1 row/device</text>
+
+    <rect x="340" y="80" width="140" height="46" rx="7" fill="#FFFFFF" stroke="#D97757" stroke-width="2"/>
+    <text x="410" y="100" text-anchor="middle">deviation test</text>
+    <text x="410" y="115" text-anchor="middle" fill="#87867F">in the automation</text>
+
+    <rect x="520" y="42" width="140" height="46" rx="7" fill="#FFFFFF" stroke="#D1CFC5"/>
+    <text x="590" y="62" text-anchor="middle">…_findings</text>
+    <text x="590" y="77" text-anchor="middle" fill="#87867F">verdict + narrative</text>
+
+    <rect x="700" y="42" width="160" height="46" rx="7" fill="#F0EEE6" stroke="#D97757" stroke-width="2"/>
+    <text x="780" y="62" text-anchor="middle">correlation rule</text>
+    <text x="780" y="77" text-anchor="middle" fill="#87867F">opens the case</text>
+
+    <g stroke="#87867F" fill="none" marker-end="url(#a)">
+      <path d="M122 65 H156"/>
+      <path d="M302 60 H330 V32 H336"/>
+      <path d="M302 70 H330 V103 H336"/>
+      <path d="M482 27 H500 V60 H516"/>
+      <path d="M482 103 H500 V70 H516"/>
+      <path d="M662 65 H696"/>
+    </g>
+  </g>
+</svg>
+<figcaption>Device location detection chain. Clay outline marks the two pieces to be built.</figcaption>
+</figure>
+
+<h3>The narrative is composed where the comparison happens</h3>
+
+<p>Only the automation holds both sides at once, so it writes the sentence rather than the rule.
+The finding row carries a <code>summary</code> field, and <code>alert_fields</code> maps it onto
+the case description.</p>
+
+<pre><code>Jared's MacBook Air left its established baseline on 3 of 4 axes.
+
+  Egress         192.77.111.1 (AS7018), never seen on this device.
+                 Baseline: 207.173.132.1 (AS7922), 47 of 47 scans.
+  Wi-Fi          4 BSSIDs, none shared with the 9 in its baseline.
+  Clock          unchanged, America/Los_Angeles.
+  Reachability   0 of 3 public resolvers answered. Baseline: 3 of 3.
+
+Baseline: 31 days, 47 scans. Last scan on baseline 2026-11-06 07:12 PST.
+Sanctioned VPN present: tailscale. Score contribution: none.</code></pre>
+
+<p>Three properties worth keeping as the format changes: every claim names what normal was, the
+unchanged axis is stated rather than omitted, and the maturity of the baseline is on the face of
+the case so an analyst can discount a thin one.</p>
+</section>
+
+<section id="widgets">
+<h2>What the dashboard shows</h2>
+
+<p>The five existing widgets stay and stop being the front page. They are the evidence an analyst
+reaches after the verdict, not the thing they open to.</p>
+
+<div class="tablewrap"><table>
+<thead><tr><th>Widget</th><th>Type</th><th>Answers</th></tr></thead>
+<tbody>
+<tr><td>Outside baseline today</td><td class="n">single value</td><td>Is there anything to do this morning</td></tr>
+<tr><td>What changed</td><td class="n">table</td><td>Device, axes moved, confidence, last date on baseline</td></tr>
+<tr><td>Where the fleet is</td><td class="n">map</td><td>Orientation, and whether a cluster is forming somewhere unexpected</td></tr>
+<tr><td>Baseline maturity</td><td class="n">column</td><td>Which devices can be judged yet, and which are still building</td></tr>
+</tbody></table></div>
+
+<p>The <em>what changed</em> table carries a <code>drilldown_config</code>, which lets a row open
+the underlying scans for that device <span class="tag t-s">sourced, skill, found on tenant
+2026-09-23</span>. That is the path from verdict to raw observables, and it is why the DNS servers
+and first public hop do not belong on the front page: they are two clicks away, where someone who
+wants them is looking for them.</p>
+
+<p>Baseline maturity earns a panel of its own because it is the honest answer to how much of the
+fleet this detection currently covers. On 2026-11-09 that is zero devices at 14 days and 10 scans,
+since the fleet has six to nine scans each.</p>
+</section>
+
+<section id="map">
+<h2>The map, and what it needs that we do not yet have</h2>
+
+<p><strong>Map is a real graph type.</strong> The full set is Area, Bubble, Column, Funnel, Gauge,
+Line, Map, Pie, Scatter, Single Value and Word Cloud
+<span class="tag t-s">sourced, Graph query results, verified byte exact 2026-11-09</span>. The
+documentation names the option and does not state what fields it binds to, which is the first
+thing to settle on the tenant.</p>
+
+<p>The detection has two possible location sources and both are currently empty on a fleet run:</p>
+
+<div class="tablewrap"><table>
+<thead><tr><th>Source</th><th>Precision</th><th>Cost</th><th>State today</th></tr></thead>
+<tbody>
+<tr><td>Wi-Fi fix from BSSIDs</td><td>Tens of metres</td><td>Google Geolocation per device</td><td>Dead on macOS; Windows only</td></tr>
+<tr><td>IP geolocation of the egress address</td><td>City, sometimes worse</td><td>One lookup per distinct egress address</td><td>Needs <code>enrich</code>, currently off</td></tr>
+</tbody></table></div>
+
+<p>Enrichment is off by default so that no key reaches an endpoint and no third party is called
+from a laptop. Both survive if the automation enriches server side, and the egress address is the
+cheap one: <strong>the fleet shares egress points, so ten devices cost two lookups, not ten</strong>.
+Resolve distinct egress addresses once per night, cache them in a lookup, and the map costs a
+handful of calls a day.</p>
+
+<p>Reserve the Wi-Fi fix for a device that has already deviated, where tens of metres is worth a
+call and the question is which building rather than which city.</p>
+
+<div class="note">
+A map answers orientation, not the question. Whether a device left California is decided by the
+baseline comparison, which works with no coordinates at all. The map is for the analyst looking at
+a fleet of thousands and asking where the outliers are, and for the screenshot that makes the
+finding legible to someone who was not in the console.
+</div>
+</section>
+
+<section id="risks">
+<h2>Three reasons this fails</h2>
+
+<h3>1. A determined user moves one axis, and one axis is not a case</h3>
+<p>Keep the laptop's timezone set to Pacific, use a VPN that terminates on the same ASN, and on a
+Mac, where the RF axis is already dark, only reachability is left. The gate that suppresses
+single-axis findings to keep the false-positive rate survivable is the same gate that lets this
+through. Windows carries the signal that closes it, and the honest statement to a customer is that
+this is strong on Windows and partial on macOS.</p>
+
+<h3>2. Daily cadence has holes a trip fits through</h3>
+<p>One scan a night means a device that leaves and returns inside 24 hours is never seen away.
+Script execution actions expire after four days, so a laptop that stays closed produces nothing,
+and its last row looks exactly like a current reading unless <code>scanned_at</code> is on the
+face of the widget. Raising the cadence raises the compute-unit cost and is the obvious lever, but
+not before a week of daily data says what the quiet hours look like.</p>
+
+<h3>3. Egress is a property of the network, not the person</h3>
+<p>A corporate VPN, SASE, or any centralised egress makes every device look like it is at the
+egress point, and the axis goes quiet for the whole fleet at once. The opposite failure is worse:
+in an estate with many egress points, roaming between offices moves the egress axis routinely, so
+the false-positive rate is set by how often people travel for work rather than by how often anyone
+does anything wrong. Both are arguments for ranking RF and clock above egress, and for never
+shipping a single-axis egress alert.</p>
+</section>
+
+<section id="sequence">
+<h2>Sequence</h2>
+
+<div class="tablewrap"><table>
+<thead><tr><th>Phase</th><th>Work</th><th>Done when</th></tr></thead>
+<tbody>
+<tr><td class="n">0</td><td>Let the nightly job accumulate. Nothing to build</td><td>Every device has 14 days and 10 scans</td></tr>
+<tr><td class="n">1</td><td>Baseline lookup and the nightly recompute in the automation</td><td>A baseline row exists per device and matches a hand-run query</td></tr>
+<tr><td class="n">2</td><td>Deviation test, confidence, maturity gate, narrative. Write finding rows</td><td>The MacBook Air trip produces a HIGH finding and nothing else fires</td></tr>
+<tr><td class="n">3</td><td>Findings collector and the correlation rule</td><td>That finding opens a case whose description reads as the narrative</td></tr>
+<tr><td class="n">4</td><td>Four analyst widgets, drilldown, map</td><td>The dashboard opens on a verdict</td></tr>
+</tbody></table></div>
+
+<p>Phase 0 is not a placeholder. The gate in phase 2 cannot be calibrated against six scans, and
+every later phase inherits whatever is decided there. Phases 1 and 2 can be built during it and
+left running against an immature fleet, which produces suppressed findings and exercises the whole
+path without raising a case.</p>
+</section>
+
+<section id="open">
+<h2>Verify on the tenant before building</h2>
+
+<ol>
+<li><strong>What the Map graph type binds to.</strong> Country name, region, or a lat and long
+pair. Decides whether IP geolocation is sufficient or coordinates are required. Read the
+<code>viewOptions</code> of a map widget that already renders somewhere on the tenant.</li>
+<li><strong>Whether a correlation rule can join a lookup.</strong> If it can, the deviation test
+could live in the rule rather than the automation and the findings dataset disappears. The design
+above assumes it cannot, which is the safe assumption and the more testable one.</li>
+<li><strong>Whether a second HTTP collector is needed.</strong> A collector's dataset is fixed at
+creation, so findings in their own dataset means a second console step. Findings in the existing
+dataset behind a <code>record_type</code> filter avoids it and makes the correlation rule
+re-evaluate scan rows it does not care about.</li>
+<li><strong>Compute-unit cost of the nightly XQL recompute.</strong> API queries meter against the
+tenant allowance. One query a night is unlikely to matter and should be measured rather than
+assumed.</li>
+</ol>
+</section>
+
+<section id="appendix">
+<h2>Appendix: measured state, 2026-11-09</h2>
+
+<details>
+<summary>Fleet and scan history</summary>
+<div class="tablewrap"><table>
+<thead><tr><th>Device</th><th>Platform</th><th>Scans</th><th>Egress points</th><th>Wi-Fi method</th></tr></thead>
+<tbody>
+<tr><td>Jared's Mac Studio</td><td>macOS</td><td class="n">9</td><td class="n">1</td><td class="n">none</td></tr>
+<tr><td>Jared's Mac mini</td><td>macOS</td><td class="n">8</td><td class="n">1</td><td class="n">none</td></tr>
+<tr><td>Jared's MacBook Air</td><td>macOS</td><td class="n">3</td><td class="n">2</td><td class="n">none</td></tr>
+<tr><td>Stormbreaker</td><td>Windows</td><td class="n">7</td><td class="n">1</td><td class="n">wlanapi</td></tr>
+<tr><td>windows-test</td><td>Windows Server</td><td class="n">7</td><td class="n">0</td><td class="n">none</td></tr>
+<tr><td>windows-prod, windows-client, windows-dirty</td><td>Windows Server</td><td class="n">6</td><td class="n">0</td><td class="n">none</td></tr>
+<tr><td>linux-test, linux-prod</td><td>Linux</td><td class="n">6</td><td class="n">0</td><td class="n">none</td></tr>
+</tbody></table></div>
+<p>Egress points of zero are the GCP lab VMs, which report no first public hop. The four Windows
+Server VMs have no wireless hardware, so <code>wifi_method: none</code> there is correct rather
+than a fault.</p>
+</details>
+
+<details>
+<summary>Why the raw dataset and not the lookup, restated once</summary>
+<p>A lookup has no <code>_time</code>, ignores the query timeframe, is mutable and has no
+retention policy. The raw dataset has a native time axis, honours the dashboard time picker, is
+append only and ages out. History goes in the raw dataset. The baseline, being one small mutable
+row per device read by joining, goes in a lookup.</p>
+</details>
+
+<details>
+<summary>Provenance</summary>
+<p>Built on the device-location sweep in
+<code>/Users/Shared/AppAndScriptProjects/work/Strata Projects/device-location-checking/xsiam/</code>.
+Platform behaviour cited here is recorded in that project's <code>README.md</code> and, where it
+generalises beyond this engagement, in the <code>xsiam-xql-correlation</code> skill files
+<code>AGENT_SCRIPTS.md</code>, <code>JOBS.md</code> and <code>WIDGETS.md</code>.</p>
+</details>
+</section>
+
+</main>
+</div>
+
+<script>
+(function () {
+  "use strict";
+  var DOC_ID = "device-location-playbook-plan-2026-11-09";
+  var LS = function (id) { return "wsa-cmt:" + DOC_ID + ":" + id; };
+  var widgets = [];
+  var savedMap = {};
+
+  function lsGet(k) { try { return localStorage.getItem(k); } catch (e) { return null; } }
+  function lsSet(k, v) { try { localStorage.setItem(k, v); } catch (e) {} }
+  function lsDel(k) { try { localStorage.removeItem(k); } catch (e) {} }
+
+  function widget(id, title) {
+    var box = document.createElement("div");
+    box.className = "cmt";
+    box.setAttribute("data-cmt", id);
+    var h = document.createElement("div");
+    h.className = "cmt-h";
+    h.appendChild(document.createTextNode("Notes: " + title + " "));
+    var state = document.createElement("span");
+    state.className = "cmt-state";
+    h.appendChild(state);
+    var ta = document.createElement("textarea");
+    ta.placeholder = "Dictate or type… kept as a draft on this device until Save comments is pressed.";
+    ta.setAttribute("aria-label", "Notes on section: " + title);
+    box.appendChild(h); box.appendChild(ta);
+    ta.addEventListener("input", function () {
+      ta.style.height = "auto"; ta.style.height = Math.min(ta.scrollHeight + 2, 480) + "px";
+      if (ta.value.trim()) lsSet(LS(id), ta.value); else lsDel(LS(id));
+      refresh();
+    });
+    widgets.push({ id: id, title: title, ta: ta, state: state });
+    return box;
+  }
+
+  function mountAll() {
+    var main = document.querySelector("main");
+    if (!main) return;
+    main.querySelectorAll("section[id]").forEach(function (sec) {
+      var h2 = sec.querySelector("h2, h1");
+      var title = h2 ? h2.textContent.replace(/\s+/g, " ").trim() : sec.id;
+      sec.appendChild(widget(sec.id, title));
+    });
+    var bar = document.createElement("div");
+    bar.id = "cmtbar";
+    bar.innerHTML = '<span id="cmtcount"></span><button id="cmtsave" type="button">Save comments</button><span id="cmtstatus"></span>';
+    document.body.appendChild(bar);
+    document.getElementById("cmtsave").addEventListener("click", saveAll);
+  }
+
+  function collect() {
+    var out = [];
+    widgets.forEach(function (w) {
+      var t = w.ta.value.trim();
+      if (t) out.push({ section: w.id, title: w.title, text: t });
+    });
+    return { doc: DOC_ID, saved_at: new Date().toISOString(), comments: out };
+  }
+
+  function refresh() {
+    var n = 0;
+    widgets.forEach(function (w) {
+      var t = w.ta.value.trim();
+      if (t) n++;
+      if (!t) { w.state.textContent = ""; w.state.className = "cmt-state"; }
+      else if (savedMap[w.id] === t) { w.state.textContent = "saved"; w.state.className = "cmt-state is-saved"; }
+      else { w.state.textContent = "draft, not saved yet"; w.state.className = "cmt-state is-draft"; }
+    });
+    var c = document.getElementById("cmtcount");
+    if (c) c.textContent = n + (n === 1 ? " comment" : " comments");
+  }
+
+  function status(msg) {
+    var el = document.getElementById("cmtstatus");
+    if (el) el.textContent = msg;
+  }
+
+  function loadSaved() {
+    return fetch("comments.json", { cache: "no-store" })
+      .then(function (r) { return r.ok ? r.json() : null; })
+      .catch(function () { return null; });
+  }
+
+  function useCap(name) {
+    try {
+      if (window.claude && typeof window.claude.use === "function") {
+        return window.claude.use(name).catch(function () { return null; });
+      }
+    } catch (e) {}
+    return Promise.resolve(null);
+  }
+
+  function saveAll() {
+    var btn = document.getElementById("cmtsave");
+    var payload = collect();
+    if (!payload.comments.length) { status("No comments yet. Dictate into any section box first."); return; }
+    var json = JSON.stringify(payload, null, 2);
+    btn.disabled = true;
+    status("Saving…");
+    var results = [];
+
+    var clip = navigator.clipboard && navigator.clipboard.writeText
+      ? navigator.clipboard.writeText(json).then(function () { results.push("copied to clipboard"); }, function () {})
+      : Promise.resolve();
+
+    clip.then(function () { return useCap("artifact"); }).then(function (artifact) {
+      if (!artifact) return false;
+      return artifact.publish({ "comments.json": { content: json, contentType: "application/json" } })
+        .then(function () {
+          results.push("saved to the artifact (Claude can read it)");
+          payload.comments.forEach(function (cm) { savedMap[cm.section] = cm.text; });
+          widgets.forEach(function (w) { if (!w.ta.value.trim()) delete savedMap[w.id]; });
+          return true;
+        }, function (e) {
+          var code = e && e.code ? e.code : "error";
+          if (code === "conflict") { status("A newer version just went live. The page reloads; drafts are kept on this device. Save again after it reloads."); return true; }
+          if (code === "not_writer" || code === "not_granted" || code === "not_declared") return false;
+          if (code === "capability_disabled" || code === "capability_removed") return false;
+          results.push("artifact save failed (" + code + ")");
+          return false;
+        });
+    }).then(function (savedToArtifact) {
+      if (savedToArtifact) return null;
+      return useCap("downloads").then(function (dl) {
+        if (!dl) return null;
+        return dl.save({ filename: DOC_ID + "-comments.json", data: json })
+          .then(function () { results.push("offered as a download"); }, function () {});
+      });
+    }).then(function () {
+      refresh();
+      status(results.length ? results.join(" · ") : "Could not save automatically. Drafts are kept on this device; select-all in a box still works.");
+    }).finally(function () { btn.disabled = false; });
+  }
+
+  document.addEventListener("DOMContentLoaded", function () {
+    mountAll();
+    loadSaved().then(function (saved) {
+      if (saved && saved.comments) {
+        saved.comments.forEach(function (cm) { savedMap[cm.section] = cm.text; });
+      }
+      widgets.forEach(function (w) {
+        var draft = lsGet(LS(w.id));
+        var v = draft !== null ? draft : (savedMap[w.id] || "");
+        if (v) { w.ta.value = v; w.ta.style.height = "auto"; w.ta.style.height = Math.min(w.ta.scrollHeight + 2, 480) + "px"; }
+      });
+      refresh();
+    });
+  });
+})();
+</script>
+</body>
+</html>

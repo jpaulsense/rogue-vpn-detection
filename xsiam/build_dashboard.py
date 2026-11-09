@@ -165,6 +165,17 @@ def make_datasets():
 
 
 def widget_payload(spec):
+    """Build one widget.
+
+    EVERY WIDGET NEEDS viewOptions, INCLUDING A PLAIN TABLE. Omit it and
+    `widgets/insert` returns 200, `widgets/get` reads the widget back intact,
+    every query runs clean over the API — and the panel renders
+    "Error initializing xql widget" in the console, with nothing anywhere
+    naming the field that is missing. Measured 2026-11-09: our four table
+    widgets were the only 4 of the tenant's 69 with no viewOptions, and the
+    only 4 that failed. A working table on this tenant carries exactly
+    {"type": "table", "commands": []}.
+    """
     data = {"phrase": spec["query"], "time_frame": TIME_FRAME}
     if spec.get("view"):
         data["viewOptions"] = {
@@ -172,6 +183,8 @@ def widget_payload(spec):
             "commands": [{"command": {"op": "=", "name": n, "value": v}}
                          for n, v in spec["view"]],
         }
+    else:
+        data["viewOptions"] = {"type": "table", "commands": []}
     tables = [t for t in (HISTORY, CURRENT) if t in spec["query"]]
     # support_time_range must be FALSE for a widget over a LOOKUP dataset.
     # A lookup has no _time, so the dashboard's time picker has nothing to

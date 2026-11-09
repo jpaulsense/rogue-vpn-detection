@@ -654,6 +654,29 @@ what is robust to them.
 A widget that is wrong in any of these three ways still renders, still returns rows, and still
 looks right. None of them produce an error anywhere.
 
+### A table widget needs `viewOptions` too, and the console is the only place that says so
+
+```json
+"viewOptions": {"type": "table", "commands": []}
+```
+
+Omit it on a widget that needs no graph options, which looks like the obvious thing to do, and
+**every API surface agrees with you**: `widgets/insert` returns 200, `widgets/get` reads the
+widget back whole, and the query runs clean. The console then renders the panel as
+
+```
+Error initializing xql widget
+```
+
+with no indication of which field is missing. Measured 2026-11-09: four of the five widgets here
+had no `viewOptions`, they were the only 4 of the tenant's 69 without one, and they were exactly
+the four that failed. `xql_vpnloc_egress_spread` worked throughout because its graph options gave
+it a `viewOptions` by accident.
+
+`widget_payload()` now defaults to the table form, so a new widget cannot be added without one.
+**The only way to catch this class of fault is to look at the dashboard.** Nothing reachable from
+the API distinguishes a widget that renders from one that does not.
+
 ```bash
 ./run_detection.py --all-workstations      # runs, then writes both datasets
 ./run_detection.py --push 102              # backfill one action

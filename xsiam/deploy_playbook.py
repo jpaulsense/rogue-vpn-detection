@@ -55,14 +55,18 @@ AUTOMATION_CODE = r'''
 import json, gzip, time, traceback
 
 LIST_NAME = "DeviceLocationCollector"
-CODE_VERSION = "v6-close"
+CODE_VERSION = "v7-gateway"
 FIELDS = ["scanned_at","host_name","agent_id","confidence","score","indicators",
           "wifi_method","bssid_count","bssids","timezone_key","utc_offset_hours",
           "first_public_hop","anchor_type","anchor_rtts","anycast_reachable",
           "anycast_rtt_ms","tailscale_derp","tailscale_relay_peers","dns_servers",
           "vpn_adapters","vpn_processes","vpn_software","sanctioned_vpn",
           "split_default_pair","in_california","physical_location","ip_address",
-          "ip_location","ip_asn","errors"]
+          "ip_location","ip_asn","errors",
+          # L2 network identity, added 2026-11-10. This is the axis that gives
+          # macOS and every wired machine a physical-network signal, the BSSID
+          # set being unavailable there. See collect_gateway_fingerprint.
+          "gateway_ips","gateway_macs","gateway_method"]
 
 
 def _cmd(name, args, context_path=None):

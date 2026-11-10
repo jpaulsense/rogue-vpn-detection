@@ -65,6 +65,7 @@ except (ImportError, ValueError):
 
 IS_WINDOWS = platform.system() == "Windows"
 IS_MACOS = platform.system() == "Darwin"
+IS_LINUX = platform.system() == "Linux"
 
 SCRIPT_VERSION = "2.1.0"
 
@@ -783,6 +784,88 @@ def collect_routes(conn, errors):
     }
 
 
+def collect_gateway_fingerprint(errors):
+    """The default gateway's MAC address: a network fingerprint with no gate on it.
+
+    WHY THIS EXISTS. The BSSID layer is the strongest location signal in this
+    detection and it is unavailable on macOS: Apple gates BSSID behind Location
+    Services authorization for the calling process and root does not satisfy it
+    (measured 2026-11-06 through the agent, every macOS row since reports
+    wifi_method `none`). That left macOS a three-axis detection.
+
+    The gateway MAC recovers most of what was lost, and is arguably the better
+    signal of the two:
+
+      * It is layer 2, BELOW any tunnel, so a VPN cannot change it. That is the
+        same property that makes a BSSID worth collecting.
+      * Nothing gates ARP. No entitlement, no Location Services, no MDM profile.
+      * It works on a WIRED connection, where there is no BSSID to read at all,
+        which covers the Mac Studio, the Mac mini and every server.
+      * It is stable per network and distinct between networks: a home router,
+        an office switch and a hotel gateway are three different MACs.
+
+    What it is not: a coordinate. Like a BSSID it answers "is this the same
+    network as last time", which is exactly what the baseline comparison asks.
+
+    THE TRAP THIS AVOIDS. A full-tunnel VPN installs its own default route, so
+    naively reading "the default gateway" returns the tunnel's and the signal
+    goes constant. Every default route is collected here, the link-local and
+    tunnel pseudo-gateways are dropped, and what remains is resolved through
+    the ARP cache, which only ever holds real L2 neighbours.
+    """
+    gateways, macs, method = [], [], "none"
+
+    if IS_MACOS or IS_LINUX:
+        if IS_MACOS:
+            output = _run(["/usr/sbin/netstat", "-rn", "-f", "inet"], timeout=30)
+            for line in output.splitlines():
+                fields = line.split()
+                if len(fields) >= 2 and fields[0] == "default":
+                    gateways.append(fields[1])
+            method = "netstat"
+        else:
+            output = _run(["/sbin/ip", "-4", "route", "show", "default"], timeout=30)
+            for line in output.splitlines():
+                fields = line.split()
+                if "via" in fields:
+                    gateways.append(fields[fields.index("via") + 1])
+            method = "iproute"
+    elif IS_WINDOWS:
+        output = _run(["route", "print", "-4"], timeout=30)
+        for line in output.splitlines():
+            fields = line.split()
+            if len(fields) >= 3 and fields[0] == "0.0.0.0" and fields[1] == "0.0.0.0":
+                gateways.append(fields[2])
+        method = "route"
+
+    # A tunnel's "gateway" is a link#N or an interface name, never an address.
+    gateways = [g for g in gateways
+                if re.match(r"^\d{1,3}(\.\d{1,3}){3}$", g or "")
+                and not g.startswith("169.254.")]
+    gateways = sorted(set(gateways))
+
+    for gateway in gateways:
+        arp = _run(["arp", "-n", gateway], timeout=15)
+        found = MAC_RE.findall(arp)
+        for mac in found:
+            mac = mac.lower()
+            # macOS prints a short form (c8:29:c8:fb:82:16 is already padded,
+            # but 0:1e:... appears for octets under 0x10). Normalise so today's
+            # value compares equal to the one in the baseline.
+            mac = ":".join(p.zfill(2) for p in mac.split(":"))
+            if mac not in macs and not mac.startswith("00:00:00:00:00"):
+                macs.append(mac)
+
+    if gateways and not macs:
+        errors.append("gateway %s did not resolve to a MAC in the ARP cache"
+                      % ",".join(gateways))
+    if not gateways:
+        method = "none"
+        errors.append("no IPv4 default gateway found")
+
+    return {"gateway_ips": gateways, "gateway_macs": macs, "gateway_method": method}
+
+
 # ---------------------------------------------------------------------------
 # 4. Path and latency
 # ---------------------------------------------------------------------------
@@ -1046,6 +1129,7 @@ def run_detection(google_api_key="", enrich=False, scan_wifi=True,
     software, ok_software = _split_sanctioned(collect_software(errors), allowed)
     dns_servers, vpn_dns = collect_dns(conn, errors)
     routing = collect_routes(conn, errors)
+    gateway = collect_gateway_fingerprint(errors)
     first_hop = collect_first_public_hop(errors)
     latency = collect_latency(latency_anchors, errors)
     tailscale = collect_tailscale(errors)
@@ -1144,6 +1228,12 @@ def run_detection(google_api_key="", enrich=False, scan_wifi=True,
         "vpn_dns_servers": _join(vpn_dns),
         "split_default_pair": routing["split_default_pair"],
         "default_route_count": routing["default_route_count"],
+
+        # L2 network identity. Survives a VPN and needs no entitlement,
+        # which is what makes it the macOS replacement for the BSSID set.
+        "gateway_ips": _join(gateway["gateway_ips"]),
+        "gateway_macs": _join(gateway["gateway_macs"]),
+        "gateway_method": gateway["gateway_method"],
 
         "first_public_hop": first_hop.get("address"),
         "first_public_hop_distance": first_hop.get("distance"),

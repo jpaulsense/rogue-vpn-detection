@@ -276,6 +276,33 @@ as root does not bypass it. The legacy `airport -s` scanner was removed in macOS
 tries `wdutil info`, then `system_profiler SPAirPortDataType`, then `airport`, and reports which
 one answered in `wifi_method`.
 
+### The macOS answer: an L2 axis that nothing gates
+
+Added 2026-11-10. The default gateway's MAC address replaces most of what the BSSID layer was
+going to provide, and it is arguably the better signal of the two:
+
+| | BSSID set | Gateway MAC |
+|---|---|---|
+| Below the VPN tunnel | yes | yes, it is layer 2 |
+| Needs an entitlement | **Location Services, per process** | no |
+| Works on a wired host | no | yes |
+| Platforms | Windows only, in practice | all three |
+
+Measured on the Mac Studio, where `bssid_count` is 0 and `wifi_method` is `none`:
+`gateway_ips 10.82.84.254`, `gateway_macs c8:29:c8:fb:82:16`, `gateway_method netstat`.
+
+It is not a coordinate. Like a BSSID it answers "is this the same network as last time", which is
+the only question the baseline comparison asks.
+
+**The trap it avoids:** a full-tunnel VPN installs its own default route, so reading "the default
+gateway" naively returns the tunnel's and the signal goes constant. All default routes are
+collected, link-local and tunnel pseudo-gateways are dropped, and the rest resolve through the ARP
+cache, which only ever holds real L2 neighbours. `collect_gateway_fingerprint` carries the detail.
+
+**This needs a console re-upload of the agent script to take effect**, along with the regenerated
+manifest: the script now returns 44 fields rather than 41, and an undeclared field is the
+unexplained 500 described above. `./build_manifest.py --check` caught the drift and is the guard.
+
 **macOS returns no BSSID through the agent, and that is settled.** An early snippet run on
 2026-11-05 recorded `system_profiler` returning 2 BSSIDs, and this section said so until
 2026-11-09; the later measurement through the uploaded agent script contradicts it and is the one

@@ -50,6 +50,48 @@ console-created `Device location Sweep 2` attaches its playbook and runs; the AP
 "the chain is broken" observation was made against the one that never ran, while the beacons being
 read came from the one that did.
 
+## The baseline, and the two things building it taught
+
+`build_baseline.py --dataset --compute --show` writes one row per device to the
+`vpn_location_baseline` lookup: the values each axis has taken, with counts, plus how much
+history backs them. A lookup is the right home for this and the wrong home for scan history,
+for the same reason in both directions: it is small, mutable, keyed and read by joining,
+and it has no time axis.
+
+Measured 2026-11-10, first run, 10 devices:
+
+```
+Jared's Mac Studio        scans=10  days=4.7  axes=3   mature=False
+Jared's MacBook Air       scans=3   days=1.0  axes=3   mature=False
+Stormbreaker              scans=7   days=3.7  axes=3   mature=False
+linux-test, linux-prod    scans=7   days=2.6  axes=0   mature=False
+```
+
+### Maturity counts `scanned_at`, never `_time`
+
+`_time` is ingest, `scanned_at` is when the endpoint ran. The collector was created on
+2026-11-07 and scans were backfilled from actions going back to 11-05, so reading `_time`
+reported **2.6 days** of history for a device observed over **4.7**. Maturity is a claim about
+how long a device has been watched, so it reads the observation time. Reading the ingest time
+holds every backfilled device immature for longer than it should be, and nothing about it looks
+wrong.
+
+### An axis that STOPS being collected looks exactly like an axis that changed
+
+The Macs carry BSSIDs in their baseline, from the snippet runs on 11-05, and will never produce
+another one: the uploaded agent script gets nothing past Location Services. A naive comparison
+of today's empty set against that history reads as "RF environment completely disjoint", which
+is the single strongest deviation signal, on every Mac, every night, forever.
+
+So the deviation test compares an axis **only when both sides are non-empty**. Absence is not
+evidence. This is also why `axes_available` is on the baseline row: a device that has never
+produced a value for an axis is a three-axis device and the case has to say so rather than
+counting silence as agreement.
+
+The two GCP Linux VMs sit at **zero axes**. No gateway, no BSSID, no timezone, no first public
+hop. They are currently invisible to this detection, which is a fact about lab VMs behind a
+cloud network rather than a fault, and it is better on the dashboard than discovered later.
+
 ## Files
 
 | File | What it is |

@@ -356,6 +356,24 @@ going to provide, and it is arguably the better signal of the two:
 Measured on the Mac Studio, where `bssid_count` is 0 and `wifi_method` is `none`:
 `gateway_ips 10.82.84.254`, `gateway_macs c8:29:c8:fb:82:16`, `gateway_method netstat`.
 
+**Each platform needs its own two commands, and the first version got two of three wrong.**
+Measured 2026-11-11 on the first fleet run after upload:
+
+| Platform | Route table | ARP cache | First attempt |
+|---|---|---|---|
+| macOS | `netstat -rn -f inet` | `arp -n <ip>` | worked |
+| Windows | `route print -4` | **`arp -a <ip>`** | gateway IP but no MAC: `-n` is not a Windows flag |
+| Linux | **`/proc/net/route`** | **`/proc/net/arp`** | nothing at all: `/sbin/ip` is not where the binary lives on those images |
+
+Linux reads `/proc` rather than shelling out because there is no portable absolute path for `ip`,
+and searching `PATH` for a binary is a worse dependency than two files every kernel exports.
+Windows prints MACs with hyphens and everything else uses colons, so the output is normalised
+before the regex sees it.
+
+Neither fault raised anything: both hosts returned a row, and the only trace was the axis being
+empty and the error string saying exactly why. **That is the argument for writing the diagnosis
+into the error at the point of collection**, which is what named both of these in one run.
+
 It is not a coordinate. Like a BSSID it answers "is this the same network as last time", which is
 the only question the baseline comparison asks.
 

@@ -815,21 +815,33 @@ def collect_gateway_fingerprint(errors):
     """
     gateways, macs, method = [], [], "none"
 
-    if IS_MACOS or IS_LINUX:
-        if IS_MACOS:
-            output = _run(["/usr/sbin/netstat", "-rn", "-f", "inet"], timeout=30)
-            for line in output.splitlines():
-                fields = line.split()
-                if len(fields) >= 2 and fields[0] == "default":
-                    gateways.append(fields[1])
-            method = "netstat"
-        else:
-            output = _run(["/sbin/ip", "-4", "route", "show", "default"], timeout=30)
-            for line in output.splitlines():
-                fields = line.split()
-                if "via" in fields:
-                    gateways.append(fields[fields.index("via") + 1])
-            method = "iproute"
+    if IS_MACOS:
+        output = _run(["/usr/sbin/netstat", "-rn", "-f", "inet"], timeout=30)
+        for line in output.splitlines():
+            fields = line.split()
+            if len(fields) >= 2 and fields[0] == "default":
+                gateways.append(fields[1])
+        method = "netstat"
+    elif IS_LINUX:
+        # /proc, not `ip route`. MEASURED 2026-11-11: the first version shelled
+        # out to /sbin/ip and both GCP VMs reported "no IPv4 default gateway
+        # found", because the binary is not at that path on those images. There
+        # is no portable absolute path for it, and searching PATH for a binary
+        # is a worse dependency than reading two files that every Linux kernel
+        # exports. /proc/net/route also cannot be confused by a VPN's own route
+        # table formatting, because it is raw.
+        try:
+            with open("/proc/net/route") as handle:
+                for line in handle.read().splitlines()[1:]:
+                    fields = line.split()
+                    if len(fields) > 2 and fields[1] == "00000000":
+                        # Little-endian hex, so 010011AC is 172.17.0.1.
+                        raw = int(fields[2], 16)
+                        gateways.append(".".join(
+                            str((raw >> shift) & 0xFF) for shift in (0, 8, 16, 24)))
+            method = "procnet"
+        except Exception as exc:
+            errors.append("/proc/net/route: %s" % exc)
     elif IS_WINDOWS:
         output = _run(["route", "print", "-4"], timeout=30)
         for line in output.splitlines():
@@ -845,7 +857,28 @@ def collect_gateway_fingerprint(errors):
     gateways = sorted(set(gateways))
 
     for gateway in gateways:
-        arp = _run(["arp", "-n", gateway], timeout=15)
+        # `arp -n <ip>` is BSD. MEASURED 2026-11-11: on Windows it is not a
+        # flag, so every Windows host returned a gateway IP and no MAC, with
+        # the ARP lookup failing silently and only the "did not resolve"
+        # error naming it. Windows wants `arp -a <ip>`. Linux reads the cache
+        # from /proc rather than shelling out at all, for the same reason the
+        # route table does.
+        if IS_LINUX:
+            arp = ""
+            try:
+                with open("/proc/net/arp") as handle:
+                    for line in handle.read().splitlines()[1:]:
+                        if line.split() and line.split()[0] == gateway:
+                            arp = line
+                            break
+            except Exception as exc:
+                errors.append("/proc/net/arp: %s" % exc)
+        elif IS_WINDOWS:
+            arp = _run(["arp", "-a", gateway], timeout=15)
+        else:
+            arp = _run(["arp", "-n", gateway], timeout=15)
+        # Windows prints MACs with hyphens, every other platform with colons.
+        arp = arp.replace("-", ":") if IS_WINDOWS else arp
         found = MAC_RE.findall(arp)
         for mac in found:
             mac = mac.lower()

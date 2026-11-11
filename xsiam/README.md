@@ -50,6 +50,29 @@ console-created `Device location Sweep 2` attaches its playbook and runs; the AP
 "the chain is broken" observation was made against the one that never ran, while the beacons being
 read came from the one that did.
 
+## The automation can write the tenant API with no key of its own
+
+Measured 2026-11-11. `core-api-post` from inside the sweep automation reaches
+`https://api-<tenant>.xdr.us.paloaltonetworks.com/public_api/v1/...`, which is the real XDR
+public API, and a write lands:
+
+```
+uri   /public_api/v1/xql/lookups/add_data
+body  {"request_data": {"dataset_name": "vpn_location_baseline", "key_fields": ["host_name"],
+                        "data": [{...}]}}
+->    {"reply": {"rows added": 1, "rows skipped": 0, "rows updated": 0}}
+```
+
+This is what lets the baseline recompute move onto the tenant instead of depending on
+`build_baseline.py` being run from a laptop. No credential is held by the automation and none
+appears in the playbook.
+
+**Two Core REST API instances answer this command**, and `executeCommand` chose a different one
+on each of two consecutive runs: `core-rest-bpa` first, `core-rest-cortex-surface-1` second. The
+first attempt failed and the second succeeded, but the bodies also differed, so this is not proof
+that one instance is broken. It is a reason to pin the instance with `using` rather than find out
+later: a command that silently round-robins between instances is a flaky dependency.
+
 ## The baseline, and the two things building it taught
 
 `build_baseline.py --dataset --compute --show` writes one row per device to the
@@ -669,8 +692,16 @@ you shape the body. The working route is **`/public_api/v2/xql/delete_dataset`**
    object of key-value pairs. Pass that and the API reads each **pair** as a row:
    `{"rows added": 0, "rows updated": 0, "rows skipped": 24}` where 24 is your field count.
    Nothing errors.
-2. **`lookups/remove_data` `filters` is a list too.** An object returns a 500 whose `err_extra`
-   begins `'str' object has ...`.
+2. **`lookups/remove_data` `filters` is a list, and the key field is the JSON KEY.** An object
+   instead of a list returns a 500 whose `err_extra` begins `'str' object has ...`. The
+   field/operator/value shape used everywhere else in this API returns
+   `400 Filter's key field field not found`, which reads as "your field does not exist" and
+   means "there is no property called field". The working form, measured 2026-11-11:
+
+   ```json
+   {"request_data": {"dataset_name": "...", "filters": [{"host_name": "__APIPROBE__"}]}}
+   ```
+   Returns `{"deleted": 1}`.
 3. **`widgets/insert` and `dashboards/insert` take `request_data` AS the list**, and each element
    wraps its payload: `{"request_data": [{"widgets_data": [widget]}]}`. A bare object returns
    400 `The request should contain only a list of JSONs`, the same trap the

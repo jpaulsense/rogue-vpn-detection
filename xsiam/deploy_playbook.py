@@ -55,7 +55,7 @@ AUTOMATION_CODE = r'''
 import json, gzip, time, traceback
 
 LIST_NAME = "DeviceLocationCollector"
-CODE_VERSION = "v7-gateway"
+CODE_VERSION = "v8-apiprobe"
 FIELDS = ["scanned_at","host_name","agent_id","confidence","score","indicators",
           "wifi_method","bssid_count","bssids","timezone_key","utc_offset_hours",
           "first_public_hop","anchor_type","anchor_rtts","anycast_reachable",
@@ -325,6 +325,23 @@ def main():
     if resp.status_code != 200:
         raise RuntimeError("collector returned %s: %s"
                            % (resp.status_code, resp.text[:300]))
+
+    # 6b. PROBE, remove once answered. Can this container reach the XDR public
+    #     API without carrying a key? The baseline recompute has to write a
+    #     lookup, `xql/lookups/add_data` lives on /public_api/v1, and the Core
+    #     integration's own errors quote paths under /api/webapp/public_api/v1,
+    #     so the surface should hang off core-api-post. If it does, the whole
+    #     baseline job moves onto the tenant and stops depending on a script
+    #     being run from a laptop. An empty request_data is deliberate: a 400
+    #     naming a missing parameter proves the route is reachable, which is
+    #     the only thing being asked here.
+    try:
+        probe = demisto.executeCommand("core-api-post", {
+            "uri": "/public_api/v1/xql/lookups/add_data",
+            "body": json.dumps({"request_data": {}})})
+        _beacon("apiprobe", json.dumps(probe)[:350])
+    except Exception as exc:               # noqa: BLE001 - probe must not fail the run
+        _beacon("apiprobe", "raised: %s" % str(exc)[:300])
 
     # 7. close the job's container from HERE, not from a playbook task.
     #
